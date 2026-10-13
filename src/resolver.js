@@ -2,11 +2,13 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { writeFile, rm } from 'node:fs/promises';
 
 const execFileP = promisify(execFile);
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const MAX_CACHE_MS = 60 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 100;
 
 const MIME_BY_EXT = {
   m4a: 'audio/mp4',
@@ -100,8 +102,13 @@ export class Resolver {
       thumbnail: j.thumbnail ?? '',
       duration: Number(j.duration) || 0,
       filesize: Number(fmt.filesize) || 0,
+      formatId: fmt.format_id ?? null,
     };
+    // Keep yt-dlp's full JSON (non-enumerable, so it never ends up in logs or the API)
+    // so downloads can reuse it via --load-info-json instead of extracting again.
+    Object.defineProperty(info, 'rawJson', { value: stdout, enumerable: false });
     this.#cache.set(videoId, { info, expires: urlExpiry(info.url) });
+    while (this.#cache.size > MAX_CACHE_ENTRIES) this.#cache.delete(this.#cache.keys().next().value);
     this.log.info(`Resolved ${videoId} "${info.title}" (${info.ext}, ${info.mime}) in ${Date.now() - started} ms`);
     return info;
   }
@@ -124,4 +131,39 @@ export function scheduleYtdlpUpdates(config, logger) {
   const t = setInterval(run, config.ytdlpUpdateHours * 3600 * 1000);
   t.unref();
   return t;
+}
+
+/**
+ * Download the resolved audio with yt-dlp itself. ffmpeg fetching googlevideo directly
+ * gets 403s for some clients/formats (chunking rules, IP-bound URLs); yt-dlp knows how
+ * to download YouTube, so let it, and only remux the local file with ffmpeg.
+ */
+export async function downloadWithYtdlp(config, logger, videoId, info, dest) {
+  const common = [
+    '--no-playlist', '--no-warnings', '--no-progress', '--fixup', 'never', '--no-part',
+    '--force-overwrites', '-o', dest,
+    ...(config.ytdlpJsRuntime ? ['--js-runtimes', config.ytdlpJsRuntime] : []),
+    ...config.ytdlpExtraArgs,
+  ];
+  const fmt = info.formatId ?? config.ytdlpFormat;
+  const run = (args) => execFileP(config.ytdlpPath, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+  const tail = (err) => (err.stderr || err.message || '').toString().trim().split('\n').slice(-2).join(' | ');
+
+  if (info.rawJson) {
+    const jsonFile = `${dest}.info.json`;
+    await writeFile(jsonFile, info.rawJson);
+    try {
+      await run(['--load-info-json', jsonFile, '-f', fmt, ...common]);
+      return;
+    } catch (err) {
+      logger.warn(`yt-dlp download from cached info failed (${tail(err)}), retrying with fresh extraction`);
+    } finally {
+      await rm(jsonFile, { force: true });
+    }
+  }
+  try {
+    await run(['-f', config.ytdlpFormat, ...common, '--', `https://www.youtube.com/watch?v=${videoId}`]);
+  } catch (err) {
+    throw new Error(`yt-dlp download failed for ${videoId}: ${tail(err)}`);
+  }
 }

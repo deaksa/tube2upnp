@@ -14,6 +14,7 @@ try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFf
 
 const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
 
+let downloads = 0;
 async function harness(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'remux-'));
   const src = path.join(dir, 'src.m4a');
@@ -33,7 +34,13 @@ async function harness(t) {
   const ms = new MediaServer(
     { mediaPort: 0, ffmpegPath: 'ffmpeg', mp3Bitrate: '128k', cacheDir: path.join(dir, 'cache'), cacheMb: 64 },
     { resolve: async () => ({ url: `http://127.0.0.1:${up.address().port}/s.m4a`, headers: { 'User-Agent': 'test' } }) },
-    new Logger('none'));
+    new Logger('none'),
+    {
+      download: async (_id, info, dest) => {
+        downloads++;
+        writeFileSync(dest, Buffer.from(await (await fetch(info.url)).arrayBuffer()));
+      },
+    });
   await ms.start();
   t.after(() => { ms.stop(); up.close(); });
   const get = async (entry, headers = {}) => {
@@ -43,7 +50,7 @@ async function harness(t) {
     writeFileSync(out, Buffer.from(await res.arrayBuffer()));
     return { res, out };
   };
-  return { get };
+  return { get, downloads: () => downloads };
 }
 
 test('mp4: lossless remux to a non-fragmented, faststart MP4 with byte ranges', { skip: !hasFfmpeg }, async (t) => {
@@ -62,10 +69,13 @@ test('mp4: lossless remux to a non-fragmented, faststart MP4 with byte ranges', 
   assert.equal(readFileSync(ranged.out).length, 100);
 });
 
-test('mp4 at offset (renderer cannot Seek)', { skip: !hasFfmpeg }, async (t) => {
-  const { get } = await harness(t);
+test('mp4 at offset (renderer cannot Seek) reuses the downloaded source', { skip: !hasFfmpeg }, async (t) => {
+  const { get, downloads } = await harness(t);
+  const before = downloads();
+  await get({ videoId: 'bbbbbbbbbbb', format: 'mp4', ext: 'm4a' });
   const { out } = await get({ videoId: 'bbbbbbbbbbb', format: 'mp4', ext: 'm4a', startAt: 45 });
   assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 15) < 0.5);
+  assert.equal(downloads() - before, 1, 'source downloaded once');
 });
 
 test('adts: lossless AAC stream, starts at offset', { skip: !hasFfmpeg }, async (t) => {

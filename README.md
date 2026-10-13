@@ -23,7 +23,7 @@ YouTube serves AAC audio in *fragmented* MP4 (DASH). Many renderers say they pla
 | `OUTPUT_FORMAT` | What the renderer gets | Quality | Seeking |
 |---|---|---|---|
 | `direct` | YouTube's stream, proxied | original | native |
-| `mp4` | Regular MP4, index at the front (remuxed, not re-encoded). The track is downloaded first, which takes 1–3 s for a song, and cached on disk. | original | native; if the renderer refuses, a new MP4 starting at the position |
+| `mp4` | Regular MP4, index at the front (remuxed, not re-encoded). yt-dlp downloads the track first, which takes a few seconds for a song, and the result is cached on disk. | original | native; if the renderer refuses, a new MP4 starting at the position |
 | `adts` | Raw AAC stream, the format internet radios use (remuxed, not re-encoded). Starts immediately. | original | stream restarted at the position |
 | `mp3` | Re-encoded MP3 | lossy (`MP3_BITRATE`) | stream restarted at the position |
 

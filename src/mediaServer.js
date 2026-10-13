@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { FORMATS, dlnaFeatures, mimeOf } from './formats.js';
+import { downloadWithYtdlp } from './resolver.js';
 
 const MAX_TOKENS = 256;
 const PASSTHROUGH_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
@@ -29,12 +30,19 @@ export function parseRange(header, size) {
 export class MediaServer {
   #tokens = new Map();
   #server = null;
-  #remuxJobs = new Map(); // cacheKey -> Promise<filePath>
+  #remuxJobs = new Map();    // `${videoId}-${startAt}` -> Promise<mp4 path>
+  #downloadJobs = new Map(); // videoId -> Promise<source path>
 
-  constructor(config, resolver, logger) {
+  /**
+   * @param {object} [opts]
+   * @param {(videoId, info, dest) => Promise<void>} [opts.download] - fetch source audio to a file
+   */
+  constructor(config, resolver, logger, opts = {}) {
     this.cfg = config;
     this.resolver = resolver;
     this.log = logger;
+    this.download = opts.download
+      ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
     this.cacheDir = config.cacheDir ?? path.join(os.tmpdir(), 'upnptube-cache');
   }
 
@@ -179,21 +187,39 @@ export class MediaServer {
 
   #remuxToFile(entry) {
     const key = `${entry.videoId}-${entry.startAt ?? 0}`;
-    if (!this.#remuxJobs.has(key)) {
-      const job = this.#runRemux(entry, key).catch((err) => {
-        this.#remuxJobs.delete(key);
-        throw err;
-      });
-      this.#remuxJobs.set(key, job);
+    return this.#once(this.#remuxJobs, key, () => this.#runRemux(entry, key));
+  }
+
+  #sourceFile(videoId) {
+    return this.#once(this.#downloadJobs, videoId, async () => {
+      const dest = path.join(this.cacheDir, `${videoId}.source`);
+      const started = Date.now();
+      const info = await this.resolver.resolve(videoId);
+      await this.download(videoId, info, dest);
+      const { size } = await fsp.stat(dest);
+      this.log.info(`Downloaded ${videoId} (${(size / 1048576).toFixed(1)} MB) in ${Date.now() - started} ms`);
+      return dest;
+    });
+  }
+
+  /** Run a job once per key; forget it if it fails so the next request retries. */
+  #once(map, key, fn) {
+    if (!map.has(key)) {
+      map.set(key, fn().catch((err) => { map.delete(key); throw err; }));
     }
-    return this.#remuxJobs.get(key);
+    return map.get(key);
   }
 
   async #runRemux(entry, key) {
+    const src = await this.#sourceFile(entry.videoId);
     const file = path.join(this.cacheDir, `${key}.m4a`);
     const part = `${file}.part`;
     const started = Date.now();
-    const args = [...await this.#inputArgs(entry), '-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4', '-y', part];
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      ...(entry.startAt > 0 ? ['-ss', String(entry.startAt)] : []),
+      '-i', src, '-vn', '-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4', '-y', part,
+    ];
     await new Promise((resolve, reject) => {
       const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
       let err = '';
@@ -202,8 +228,7 @@ export class MediaServer {
       ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg remux exited ${code}: ${err.trim().split('\n').pop()}`))));
     });
     await fsp.rename(part, file);
-    const { size } = await fsp.stat(file);
-    this.log.info(`Remuxed ${entry.videoId} to MP4 (${(size / 1048576).toFixed(1)} MB) in ${Date.now() - started} ms`);
+    this.log.info(`Remuxed ${entry.videoId}${entry.startAt ? ` @${entry.startAt}s` : ''} to MP4 in ${Date.now() - started} ms`);
     this.#pruneCache().catch(() => {});
     return file;
   }
@@ -211,15 +236,15 @@ export class MediaServer {
   async #pruneCache() {
     const limit = (this.cfg.cacheMb ?? 512) * 1048576;
     const files = await Promise.all((await fsp.readdir(this.cacheDir))
-      .filter((f) => f.endsWith('.m4a'))
+      .filter((f) => f.endsWith('.m4a') || f.endsWith('.source'))
       .map(async (f) => ({ f, ...(await fsp.stat(path.join(this.cacheDir, f))) })));
     files.sort((a, b) => b.atimeMs - a.atimeMs); // newest first
     let total = 0;
     for (const x of files) {
       total += x.size;
       if (total > limit) {
-        const key = x.f.slice(0, -4);
-        this.#remuxJobs.delete(key);
+        if (x.f.endsWith('.source')) this.#downloadJobs.delete(x.f.slice(0, -'.source'.length));
+        else this.#remuxJobs.delete(x.f.slice(0, -'.m4a'.length));
         await fsp.rm(path.join(this.cacheDir, x.f), { force: true });
       }
     }
