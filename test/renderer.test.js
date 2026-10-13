@@ -79,6 +79,28 @@ test('picks the first format the renderer advertises (lossless ADTS before MP3)'
   await r.destroy();
 });
 
+test('prefers lossless FLAC over MP3 when the renderer lists FLAC but no AAC', async (t) => {
+  const fake = await startFakeRenderer({ sink: 'http-get:*:audio/mpeg:*,http-get:*:audio/x-flac:*' });
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake);
+  await r.init();
+  await r.doPlay({ id: 'dQw4w9WgXcQ' }, 0);
+  assert.equal(registered[0].format, 'flac');
+  assert.match(fake.calls.find((c) => c.action === 'SetAVTransportURI').body, /audio\/flac:DLNA.ORG_OP=01/);
+  await r.destroy();
+});
+
+test('FLAC: if the renderer rejects Seek, a new FLAC starting at the offset is sent', async (t) => {
+  const fake = await startFakeRenderer({ bareFaultOn: ['Seek'] });
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake, { outputFormat: 'flac' });
+  await r.init();
+  await r.doPlay({ id: 'dQw4w9WgXcQ' }, 0);
+  assert.equal(await r.doSeek(50), true);
+  assert.deepEqual(registered.map((e) => [e.format, e.startAt]), [['flac', 0], ['flac', 50]]);
+  await r.destroy();
+});
+
 test('MP3 only when the renderer advertises nothing better', async (t) => {
   const fake = await startFakeRenderer({ sink: 'http-get:*:audio/mpeg:*' });
   t.after(() => fake.server.close());

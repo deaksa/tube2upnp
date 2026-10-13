@@ -63,21 +63,27 @@ export const config = Object.freeze({
   ytdlpUpdateHours: int('YTDLP_UPDATE_HOURS', 24),
   ytdlpUpdateCmd: str('YTDLP_UPDATE_CMD', ''),
 
-  // Stream format sent to renderers: auto | direct | mp4 | adts | mp3 (see formats.js).
-  // "auto" tries direct -> mp4 -> adts -> mp3 and remembers what works per renderer.
+  // Stream format sent to renderers: auto | direct | mp4 | adts | flac | mp3 (see formats.js).
+  // "auto" tries them in that order and remembers what works per renderer.
   // Legacy TRANSCODE=always|never maps to mp3|direct.
   outputFormat: (() => {
     const f = str('OUTPUT_FORMAT', '');
     if (f) {
-      if (!['auto', 'direct', 'mp4', 'adts', 'mp3'].includes(f)) throw new Error(`OUTPUT_FORMAT "${f}" is not valid`);
+      if (!['auto', 'direct', 'mp4', 'adts', 'flac', 'mp3'].includes(f)) throw new Error(`OUTPUT_FORMAT "${f}" is not valid`);
       return f;
     }
     return { always: 'mp3', never: 'direct' }[str('TRANSCODE', 'auto')] ?? 'auto';
   })(),
   ffmpegPath: str('FFMPEG_PATH', 'ffmpeg'),
   mp3Bitrate: str('MP3_BITRATE', '192k'),
+  // FLAC bit depth: 16 (CD, smaller, most compatible) or 24.
+  flacBits: (() => {
+    const b = int('FLAC_BITS', 16);
+    if (b !== 16 && b !== 24) throw new Error('FLAC_BITS must be 16 or 24');
+    return b;
+  })(),
 
-  // Disk cache for remuxed MP4 files (mp4 format).
+  // Disk cache for downloaded tracks and built mp4/flac files.
   cacheDir: str('CACHE_DIR', null),
   cacheMb: int('CACHE_MB', 512),
 

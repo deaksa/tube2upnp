@@ -15,7 +15,7 @@ try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFf
 const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
 
 let downloads = 0;
-async function harness(t) {
+async function harness(t, cfg = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'remux-'));
   const src = path.join(dir, 'src.m4a');
   execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=60',
@@ -32,7 +32,7 @@ async function harness(t) {
   });
   await new Promise((r) => up.listen(0, '127.0.0.1', r));
   const ms = new MediaServer(
-    { mediaPort: 0, ffmpegPath: 'ffmpeg', mp3Bitrate: '128k', cacheDir: path.join(dir, 'cache'), cacheMb: 64 },
+    { mediaPort: 0, ffmpegPath: 'ffmpeg', mp3Bitrate: '128k', cacheDir: path.join(dir, 'cache'), cacheMb: 64, ...cfg },
     { resolve: async () => ({ url: `http://127.0.0.1:${up.address().port}/s.m4a`, headers: { 'User-Agent': 'test' } }) },
     new Logger('none'),
     {
@@ -87,6 +87,30 @@ test('adts: lossless AAC stream, starts at offset', { skip: !hasFfmpeg }, async 
   assert.equal(probe(out, 'format=format_name'), 'aac');
   // ADTS has no index; ffprobe estimates duration from bitrate, so allow slack.
   assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 30) < 3);
+});
+
+for (const bits of [16, 24]) {
+  test(`flac (${bits}-bit): lossless file with byte ranges and correct length`, { skip: !hasFfmpeg }, async (t) => {
+    const { get } = await harness(t, { flacBits: bits });
+    const { res, out } = await get({ videoId: `eeeeeeeee${bits}`, format: 'flac', ext: 'm4a' });
+    assert.equal(res.headers.get('content-type'), 'audio/flac');
+    assert.equal(Number(res.headers.get('content-length')), readFileSync(out).length);
+    assert.match(res.headers.get('contentfeatures.dlna.org'), /DLNA.ORG_OP=01/);
+    assert.equal(probe(out, 'stream=codec_name'), 'flac');
+    assert.equal(probe(out, 'stream=bits_per_raw_sample'), String(bits));
+    assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 60) < 0.5);
+    assert.equal(readFileSync(out).subarray(0, 4).toString('latin1'), 'fLaC');
+
+    const ranged = await get({ videoId: `eeeeeeeee${bits}`, format: 'flac', ext: 'm4a' }, { Range: 'bytes=0-3' });
+    assert.equal(ranged.res.status, 206);
+    assert.equal(readFileSync(ranged.out).toString('latin1'), 'fLaC');
+  });
+}
+
+test('flac at offset (renderer cannot Seek)', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t);
+  const { out } = await get({ videoId: 'fffffffffff', format: 'flac', ext: 'm4a', startAt: 40 });
+  assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 20) < 0.5);
 });
 
 test('mp3 transcode', { skip: !hasFfmpeg }, async (t) => {

@@ -14,9 +14,10 @@ services:
       - upnptube-data:/data
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      OUTPUT_FORMAT: ${OUTPUT_FORMAT:-auto}   # auto | direct | mp4 | adts | mp3
+      OUTPUT_FORMAT: ${OUTPUT_FORMAT:-auto}   # auto | direct | mp4 | adts | flac | mp3
       CACHE_MB: ${CACHE_MB:-512}              # disk cache for mp4 downloads/remuxes
       MP3_BITRATE: ${MP3_BITRATE:-192k}
+      FLAC_BITS: ${FLAC_BITS:-16}             # 16 | 24
       ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
       RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
       RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app

@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { FORMATS, dlnaFeatures, mimeOf } from './formats.js';
+import { FORMATS, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
 import { downloadWithYtdlp } from './resolver.js';
 
 const MAX_TOKENS = 256;
@@ -30,7 +30,7 @@ export function parseRange(header, size) {
 export class MediaServer {
   #tokens = new Map();
   #server = null;
-  #remuxJobs = new Map();    // `${videoId}-${startAt}` -> Promise<mp4 path>
+  #remuxJobs = new Map();    // `${videoId}-${format}-${startAt}` -> Promise<file path>
   #downloadJobs = new Map(); // videoId -> Promise<source path>
 
   /**
@@ -83,9 +83,9 @@ export class MediaServer {
     return `/stream/${token}.${FORMATS[entry.format].ext ?? entry.ext}`;
   }
 
-  /** Do any slow preparation (mp4 remux) before the renderer is told to play. */
+  /** Do any slow preparation (building mp4/flac files) before the renderer is told to play. */
   async prepare(entry) {
-    if (entry.format === 'mp4') await this.#remuxToFile(entry);
+    if (FILE_FORMATS.includes(entry.format)) await this.#remuxToFile(entry);
   }
 
   async #handle(req, res) {
@@ -99,7 +99,9 @@ export class MediaServer {
     if (req.method === 'GET') entry.onRequest?.();
 
     switch (entry.format) {
-      case 'mp4': return this.#serveFile(req, res, await this.#remuxToFile(entry));
+      case 'mp4':
+      case 'flac':
+        return this.#serveFile(req, res, entry.format, await this.#remuxToFile(entry));
       case 'adts': return this.#pipe(req, res, entry, ['-c:a', 'copy', '-f', 'adts']);
       case 'mp3': return this.#pipe(req, res, entry, ['-c:a', 'libmp3lame', '-b:a', this.cfg.mp3Bitrate, '-f', 'mp3']);
       default: return this.#proxy(req, res, entry, await this.resolver.resolve(entry.videoId), true);
@@ -183,10 +185,10 @@ export class MediaServer {
     res.on('close', () => ff.kill('SIGKILL'));
   }
 
-  // ------------------------------------------------------------ mp4 (file)
+  // ------------------------------------------------------- mp4 / flac (file)
 
   #remuxToFile(entry) {
-    const key = `${entry.videoId}-${entry.startAt ?? 0}`;
+    const key = `${entry.videoId}-${entry.format}-${entry.startAt ?? 0}`;
     return this.#once(this.#remuxJobs, key, () => this.#runRemux(entry, key));
   }
 
@@ -212,13 +214,13 @@ export class MediaServer {
 
   async #runRemux(entry, key) {
     const src = await this.#sourceFile(entry.videoId);
-    const file = path.join(this.cacheDir, `${key}.m4a`);
+    const file = path.join(this.cacheDir, `${key}.${FORMATS[entry.format].ext}`);
     const part = `${file}.part`;
     const started = Date.now();
     const args = [
       '-hide_banner', '-loglevel', 'error',
       ...(entry.startAt > 0 ? ['-ss', String(entry.startAt)] : []),
-      '-i', src, '-vn', '-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4', '-y', part,
+      '-i', src, '-vn', ...this.#fileCodecArgs(entry.format), '-y', part,
     ];
     await new Promise((resolve, reject) => {
       const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -228,15 +230,24 @@ export class MediaServer {
       ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg remux exited ${code}: ${err.trim().split('\n').pop()}`))));
     });
     await fsp.rename(part, file);
-    this.log.info(`Remuxed ${entry.videoId}${entry.startAt ? ` @${entry.startAt}s` : ''} to MP4 in ${Date.now() - started} ms`);
+    this.log.info(`${entry.format === 'mp4' ? 'Remuxed' : 'Encoded'} ${entry.videoId}${entry.startAt ? ` @${entry.startAt}s` : ''} to ${entry.format.toUpperCase()} in ${Date.now() - started} ms`);
     this.#pruneCache().catch(() => {});
     return file;
+  }
+
+  #fileCodecArgs(format) {
+    if (format === 'flac') {
+      // AAC decodes to float; store as 16- or 24-bit integer PCM, losslessly compressed.
+      const bits = this.cfg.flacBits === 24 ? ['-sample_fmt', 's32', '-bits_per_raw_sample', '24'] : ['-sample_fmt', 's16'];
+      return ['-c:a', 'flac', ...bits, '-compression_level', '5', '-f', 'flac'];
+    }
+    return ['-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4'];
   }
 
   async #pruneCache() {
     const limit = (this.cfg.cacheMb ?? 512) * 1048576;
     const files = await Promise.all((await fsp.readdir(this.cacheDir))
-      .filter((f) => f.endsWith('.m4a') || f.endsWith('.source'))
+      .filter((f) => /\.(m4a|flac|source)$/.test(f))
       .map(async (f) => ({ f, ...(await fsp.stat(path.join(this.cacheDir, f))) })));
     files.sort((a, b) => b.atimeMs - a.atimeMs); // newest first
     let total = 0;
@@ -244,15 +255,15 @@ export class MediaServer {
       total += x.size;
       if (total > limit) {
         if (x.f.endsWith('.source')) this.#downloadJobs.delete(x.f.slice(0, -'.source'.length));
-        else this.#remuxJobs.delete(x.f.slice(0, -'.m4a'.length));
+        else this.#remuxJobs.delete(x.f.replace(/\.\w+$/, ''));
         await fsp.rm(path.join(this.cacheDir, x.f), { force: true });
       }
     }
   }
 
-  async #serveFile(req, res, file) {
+  async #serveFile(req, res, format, file) {
     const { size } = await fsp.stat(file);
-    const headers = { ...this.#headers('mp4', 'audio/mp4'), 'Accept-Ranges': 'bytes' };
+    const headers = { ...this.#headers(format, FORMATS[format].mime), 'Accept-Ranges': 'bytes' };
     const range = req.headers.range ? parseRange(req.headers.range, size) : null;
     if (range === 'invalid') {
       res.writeHead(416, { 'Content-Range': `bytes */${size}` }).end();

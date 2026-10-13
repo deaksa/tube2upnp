@@ -5,7 +5,7 @@ import { RendererDataStore } from './dataStore.js';
 import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
-import { FORMATS, FALLBACK_CHAIN, dlnaFeatures, mimeOf } from './formats.js';
+import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
 
 export class Renderer extends Player {
   #call;
@@ -192,7 +192,7 @@ export class Renderer extends Player {
           current.fetched = true;
         },
       };
-      await this.media.prepare(entry); // mp4: remux before the renderer asks for it
+      await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
       if (seq !== this.#loadSeq) return false;
       const url = `http://${this.#ip}:${this.cfg.mediaPort}${this.media.register(entry)}`;
       const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
@@ -292,10 +292,10 @@ export class Renderer extends Player {
       return this.#load(c.video, position, c.format);
     }
     if (await this.#ok('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) })) return true;
-    if (c.format !== 'mp4') return false;
-    // Renderer rejected Seek: remux a new MP4 that starts at the position (still lossless).
-    this.log.info(`Renderer rejected Seek - restarting MP4 at ${Math.floor(position)}s`);
-    return this.#load(c.video, position, 'mp4', { offsetStart: true });
+    if (!FILE_FORMATS.includes(c.format)) return false;
+    // Renderer rejected Seek: build a new file that starts at the position (still lossless).
+    this.log.info(`Renderer rejected Seek - restarting ${c.format} at ${Math.floor(position)}s`);
+    return this.#load(c.video, position, c.format, { offsetStart: true });
   }
 
   async doSetVolume(volume) {

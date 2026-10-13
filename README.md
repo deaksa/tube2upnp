@@ -25,6 +25,7 @@ YouTube serves AAC audio in *fragmented* MP4 (DASH). Many renderers say they pla
 | `direct` | YouTube's stream, proxied | original | native |
 | `mp4` | Regular MP4, index at the front (remuxed, not re-encoded). yt-dlp downloads the track first, which takes a few seconds for a song, and the result is cached on disk. | original | native; if the renderer refuses, a new MP4 starting at the position |
 | `adts` | Raw AAC stream, the format internet radios use (remuxed, not re-encoded). Starts immediately. | original | stream restarted at the position |
+| `flac` | FLAC: the AAC decoded and stored losslessly (16- or 24-bit, `FLAC_BITS`). Built as a file like `mp4`. Roughly 6–8× the size of the AAC (about 25–35 MB for a 4-minute song, which a LAN doesn't notice), so consider raising `CACHE_MB`. | original (no second lossy encode) | native; if the renderer refuses, a new FLAC starting at the position |
 | `mp3` | Re-encoded MP3 | lossy (`MP3_BITRATE`) | stream restarted at the position |
 
 With `auto` (the default), upnpTube tries them in that order, skipping formats the renderer says it doesn't support. If a renderer hasn't started playing after `START_TIMEOUT_MS`, the next format is tried. The first one that plays is remembered for that renderer, across restarts. To re-detect, delete the renderer's folder in `DATA_DIR`.
@@ -80,10 +81,11 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `STATUS_PORT` | `8080` | Status page and pairing codes. `0` disables it. |
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
-| `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
+| `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
 | `CACHE_MB` | `512` | Size cap for the `mp4` disk cache (downloaded and remuxed tracks), oldest evicted first. It's cleared on restart. |
 | `CACHE_DIR` | temp dir | Where that cache lives |
-| `MP3_BITRATE` | `192k` | Bitrate used when transcoding |
+| `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
+| `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |
 | `YTDLP_JS_RUNTIME` | `node` | Passed to `--js-runtimes`. Empty disables it. |
 | `YTDLP_EXTRA_ARGS` | – | Extra yt-dlp arguments, e.g. `--cookies /data/cookies.txt` |
@@ -106,11 +108,11 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 **It casts, but nothing plays.**
 - Run with `LOG_LEVEL=debug`. You'll see whether the renderer ever requests `/stream/...`.
 - If it never connects, set `ADVERTISE_IP` to the LAN address and check the firewall on `MEDIA_PORT`.
-- With `OUTPUT_FORMAT=auto`, a renderer that doesn't start is tried with the next format, and the winner is remembered. To find the right one by hand, set `OUTPUT_FORMAT` to `mp4`, then `adts`, then `mp3`, and keep the first that plays.
+- With `OUTPUT_FORMAT=auto`, a renderer that doesn't start is tried with the next format, and the winner is remembered. To find the right one by hand, set `OUTPUT_FORMAT` to `mp4`, then `adts`, then `flac`, then `mp3`, and keep the first that plays.
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).** Update yt-dlp first, which happens automatically by default. If the server's IP is flagged by YouTube, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
 
-**Seeking.** With `direct` and `mp4` the renderer seeks natively. With `adts` and `mp3`, upnpTube restarts the stream from the new position, so a seek takes a second or two longer.
+**Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, upnpTube restarts the stream from the new position, so a seek takes a second or two longer.
 
 ## What changed in v2
 
@@ -121,7 +123,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 - **Own SOAP client:** replaces `upnp-device-client`, which crashed the process on fault responses without `<errorDescription>` and sent a wrong `Content-Length` for non-ASCII (accented) metadata.
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
-- **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
+- **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux, or FLAC), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
 - **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
