@@ -20,6 +20,7 @@ class FakeReceiver extends EventEmitter {
 function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-'))) {
   let receiverOpts;
   const registered = [];
+  const resolves = [];
   const config = {
     nameTemplate: '🔊 {name}', include: null, exclude: null, outputFormat: 'auto',
     advertiseIp: null, mediaPort: 8000, pollIntervalMs: 50, startTimeoutMs: 200, autoplayOnConnect: true,
@@ -30,16 +31,20 @@ function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), '
     deps: {
       config,
       logger: new Logger('none'),
-      resolver: { resolve: async () => ({ url: 'https://example/v', ext: 'm4a', mime: 'audio/mp4',
-        headers: {}, title: 'Song & Dance – Pitypang ő ű', artist: 'Band', album: '', thumbnail: 'https://i/x.jpg', duration: 210 }) },
+      resolver: { resolve: async (id) => { resolves.push(id); return ({ url: 'https://example/v', ext: 'm4a', mime: 'audio/mp4',
+        headers: {}, title: `Song & Dance – Pitypang ő ű ${id}`, artist: 'Band', album: '', thumbnail: 'https://i/x.jpg', duration: 210 }); } },
       mediaServer: {
         prepare: async () => {},
-        register: (e) => { e.onRequest?.(); registered.push(e); return `/stream/${'a'.repeat(32)}.${e.format === 'direct' ? e.ext : e.format}`; },
+        register: (e) => {
+          e.onRequest?.();
+          registered.push(e);
+          return `/stream/${String(registered.length).padStart(32, '0')}.${e.format === 'direct' ? e.ext : e.format}`;
+        },
       },
       createReceiver: (_p, opts) => { receiverOpts = opts; return new FakeReceiver(); },
     },
   });
-  return { r, registered, opts: () => receiverOpts };
+  return { r, registered, resolves, opts: () => receiverOpts };
 }
 
 test('init handles embedded renderer and names the receiver', async (t) => {
@@ -59,7 +64,7 @@ test('doPlay loads short URL with DIDL metadata and plays', async (t) => {
   await r.init();
   assert.equal(await r.doPlay({ id: 'dQw4w9WgXcQ' }, 0), true);
   const set = fake.calls.find((c) => c.action === 'SetAVTransportURI');
-  assert.match(set.body, /http:\/\/127\.0\.0\.1:8000\/stream\/a{32}\.m4a/);
+  assert.match(set.body, /http:\/\/127\.0\.0\.1:8000\/stream\/0{31}1\.m4a/);
   assert.match(set.body, /Song &amp;amp; Dance/);
   assert.ok(fake.calls.some((c) => c.action === 'Play'));
   assert.equal(registered[0].format, 'direct');
@@ -196,5 +201,71 @@ test('casting mid-video with a non-seekable format starts the stream at that pos
   await r.doPlay({ id: 'dQw4w9WgXcQ' }, 36);
   assert.equal(registered[0].startAt, 36);
   assert.match(fake.calls.find((c) => c.action === 'SetAVTransportURI').body, /duration=&quot;0:02:54\.000&quot;/);
+  await r.destroy();
+});
+
+const A = 'AAAAAAAAAAA';
+const B = 'BBBBBBBBBBB';
+const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+
+test('gapless: next track is prepared, queued with SetNextAVTransportURI, and adopted without reloading', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.getUpcomingVideo = () => ({ id: B });
+  assert.equal(await r.doPlay({ id: A }, 0), true);
+  await wait(300);
+
+  const setNext = fake.calls.find((c) => c.action === 'SetNextAVTransportURI');
+  assert.ok(setNext, 'next track handed to renderer');
+  assert.equal(registered[1].videoId, B);
+  assert.match(fake.state.nextUri, new RegExp(`/stream/0{31}2\\.m4a$`));
+
+  // Renderer finishes A and plays on into B by itself. What yt-cast-receiver does:
+  r.next = async () => r.doPlay({ id: B }, 0);
+  r.getUpcomingVideo = () => null;
+  const loadsBefore = fake.calls.filter((c) => c.action === 'SetAVTransportURI').length;
+  fake.advance();
+  await wait(300);
+  assert.equal(r.nowPlaying.videoId, B);
+  assert.equal(fake.calls.filter((c) => c.action === 'SetAVTransportURI').length, loadsBefore, 'B was not reloaded');
+  assert.equal(fake.state.transport, 'PLAYING');
+  await r.destroy();
+});
+
+test('no gapless support: falls back cleanly and uses the prepared track at end of song', async (t) => {
+  const fake = await startFakeRenderer({ noGapless: true });
+  t.after(() => fake.server.close());
+  const { r, resolves } = setup(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.doPlay({ id: A }, 0);
+  await wait(300);
+  assert.deepEqual(resolves, [A, B], 'B resolved ahead of time');
+
+  // Song ends; renderer stops; YouTube asks for B.
+  assert.equal(await r.doPlay({ id: B }, 0), true);
+  assert.deepEqual(resolves, [A, B], 'B not resolved again - prepared item reused');
+  assert.match(fake.state.currentUri, /0{31}2\.m4a$/);
+  await r.destroy();
+});
+
+test('queue change replaces the prepared next track', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.doPlay({ id: A }, 0);
+  await wait(250);
+  const C = 'CCCCCCCCCCC';
+  r.getUpcomingVideo = () => ({ id: C });
+  await wait(250);
+  const nexts = fake.calls.filter((c) => c.action === 'SetNextAVTransportURI');
+  assert.equal(nexts.length, 2);
+  r.getUpcomingVideo = () => null; // end of queue, autoplay off: renderer's next slot cleared
+  await wait(250);
+  assert.equal(fake.state.nextUri, '');
   await r.destroy();
 });

@@ -18,6 +18,8 @@ services:
       CACHE_MB: ${CACHE_MB:-512}              # disk cache for mp4 downloads/remuxes
       MP3_BITRATE: ${MP3_BITRATE:-192k}
       FLAC_BITS: ${FLAC_BITS:-16}             # 16 | 24
+      PREFETCH: ${PREFETCH:-true}             # prepare the next track in advance
+      GAPLESS: ${GAPLESS:-true}               # hand it to the renderer (SetNextAVTransportURI)
       ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
       RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
       RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app

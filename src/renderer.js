@@ -1,6 +1,6 @@
 // One UPnP MediaRenderer exposed as one YouTube cast receiver.
 
-import YouTubeCastReceiver, { Player, PLAYER_STATUSES } from 'yt-cast-receiver';
+import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
 import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
@@ -19,6 +19,11 @@ export class Renderer extends Player {
   #store = null;
   #learnedFormat = null;   // format that worked on this renderer (persisted)
   #current = null;         // { video, format, startAt, loadedAt, fetched }
+  #queued = null;          // prepared next track: { video, item, sentToRenderer }
+  #advanced = null;        // queued track the renderer already switched to by itself
+  #prefetching = false;
+  #polling = false;
+  #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
 
   /**
    * @param {object} p
@@ -60,6 +65,12 @@ export class Renderer extends Player {
 
   get receiverStatus() {
     return this.#receiver?.status ?? 'stopped';
+  }
+
+  /** Title of the prepared next track, for the status page. */
+  get upNext() {
+    const q = this.#queued;
+    return q ? { title: q.item.info.title, gapless: q.sentToRenderer } : null;
   }
 
   get connectedSenders() {
@@ -164,6 +175,15 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
+    const adv = this.#advanced;
+    this.#advanced = null;
+    if (adv && adv.video.id === video.id && position < 2) {
+      // The renderer is already playing it (gapless); just bring our state in line.
+      this.#loadSeq++;
+      this.#adopt(adv.item, true);
+      this.log.info(`Now playing "${adv.item.info.title}" (continued gaplessly)`);
+      return true;
+    }
     return this.#load(video, position);
   }
 
@@ -177,55 +197,29 @@ export class Renderer extends Player {
     const seq = ++this.#loadSeq;
     this.#stopPolling();
     try {
-      const info = await this.resolver.resolve(video.id);
+      // Already prepared in the background while the previous track played?
+      const prepared = !format && !offsetStart && position < 2 && this.#queued?.video.id === video.id
+        ? this.#queued.item : null;
+      this.#queued = null; // the renderer's "next" slot is re-sent after this load
+      const item = prepared ?? await this.#prepareItem(video, position, format, offsetStart);
       if (seq !== this.#loadSeq) return false; // superseded by a newer play()
-
-      format ??= this.#chooseFormat(info.mime);
-      const mime = mimeOf(format, info.mime);
-      // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
-      const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
-      const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false };
-      const entry = {
-        videoId: video.id, format, ext: info.ext, startAt,
-        onRequest: () => {
-          if (!current.fetched) this.log.info(`Renderer started fetching the stream (${format})`);
-          current.fetched = true;
-        },
-      };
-      await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
-      if (seq !== this.#loadSeq) return false;
-      const url = `http://${this.#ip}:${this.cfg.mediaPort}${this.media.register(entry)}`;
-      const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
+      if (prepared) this.log.info(`Using prepared track "${item.info.title}"`);
 
       this.#expectStop = true;
       await this.#safeCall('AVTransport', 'Stop', { InstanceID: 0 });
-
       await this.#call('AVTransport', 'SetAVTransportURI', {
-        InstanceID: 0,
-        CurrentURI: url,
-        CurrentURIMetaData: buildDidl({
-          url, protocolInfo,
-          title: info.title, artist: info.artist, album: info.album,
-          albumArt: info.thumbnail, duration: Math.max(0, info.duration - startAt),
-          isVideo: mime.startsWith('video/'),
-        }),
+        InstanceID: 0, CurrentURI: item.url, CurrentURIMetaData: item.metadata,
       });
       await this.#call('AVTransport', 'Play', { InstanceID: 0, Speed: 1 });
       if (seq !== this.#loadSeq) return false;
 
-      if (position > 1 && !startAt) {
+      if (position > 1 && !item.current.startAt) {
         await this.#waitForState(['PLAYING'], 8000);
         await this.#safeCall('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
       }
 
-      current.loadedAt = Date.now();
-      this.#current = current;
-      this.nowPlaying = { videoId: video.id, title: info.title, artist: info.artist, duration: info.duration, format };
-      this.lastError = null;
-      this.#sawPlaying = false;
-      this.#expectStop = false;
-      this.#startPolling();
-      this.log.info(`Sent "${info.title}" to renderer as ${format} (${mime})`);
+      this.#adopt(item, false);
+      this.log.info(`Sent "${item.info.title}" to renderer as ${item.format} (${item.mime})`);
       return true;
     } catch (err) {
       this.lastError = err.message;
@@ -233,6 +227,122 @@ export class Renderer extends Player {
       this.#expectStop = false;
       return false;
     }
+  }
+
+  /** Resolve, build (mp4/flac) and register a track; returns everything needed to play it. */
+  async #prepareItem(video, position, format = null, offsetStart = false) {
+    const info = await this.resolver.resolve(video.id);
+    format ??= this.#chooseFormat(info.mime);
+    const mime = mimeOf(format, info.mime);
+    // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
+    const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
+    const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false };
+    const entry = {
+      videoId: video.id, format, ext: info.ext, startAt,
+      onRequest: () => {
+        if (!current.fetched) this.log.info(`Renderer started fetching the stream (${format})`);
+        current.fetched = true;
+      },
+    };
+    await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
+    const streamPath = this.media.register(entry);
+    const url = `http://${this.#ip}:${this.cfg.mediaPort}${streamPath}`;
+    const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
+    const metadata = buildDidl({
+      url, protocolInfo,
+      title: info.title, artist: info.artist, album: info.album,
+      albumArt: info.thumbnail, duration: Math.max(0, info.duration - startAt),
+      isVideo: mime.startsWith('video/'),
+    });
+    return { current, info, format, mime, url, streamPath, metadata };
+  }
+
+  /** Make `item` the current track (after we loaded it, or the renderer switched to it). */
+  #adopt(item, alreadyPlaying) {
+    item.current.loadedAt = Date.now();
+    this.#current = item.current;
+    this.nowPlaying = {
+      videoId: item.current.video.id, title: item.info.title, artist: item.info.artist,
+      duration: item.info.duration, format: item.format,
+    };
+    this.lastError = null;
+    this.#sawPlaying = alreadyPlaying;
+    this.#expectStop = false;
+    this.#startPolling();
+  }
+
+  // ------------------------------------------------------ next-track prefetch
+
+  /** The video YouTube will play after the current one (queue, then autoplay). */
+  getUpcomingVideo() {
+    const st = this.queue.getState();
+    if (st.next) return st.next;
+    if (this.autoplayMode === AUTOPLAY_MODES.ENABLED && st.autoplay) return st.autoplay;
+    return null;
+  }
+
+  /**
+   * Keep the next track prepared, and - if the renderer supports it - queued on the
+   * renderer with SetNextAVTransportURI so it plays on without a gap.
+   */
+  async #maintainNext() {
+    if (!this.cfg.prefetch || this.#prefetching || !this.#current) return;
+    const up = this.getUpcomingVideo();
+    const currentId = this.#current.video.id;
+
+    if (!up || up.id === currentId) {
+      if (this.#queued?.sentToRenderer) {
+        await this.#safeCall('AVTransport', 'SetNextAVTransportURI', { InstanceID: 0, NextURI: '', NextURIMetaData: '' });
+      }
+      this.#queued = null;
+      return;
+    }
+    if (this.#queued?.video.id === up.id) return;
+
+    this.#prefetching = true;
+    try {
+      const item = await this.#prepareItem(up, 0);
+      // Queue or current track changed while we were preparing? Try again next poll.
+      if (this.getUpcomingVideo()?.id !== up.id || this.#current?.video.id !== currentId) return;
+      this.#queued = { video: up, item, sentToRenderer: false };
+      this.log.info(`Prepared next track "${item.info.title}" (${item.format})`);
+      await this.#sendNextToRenderer();
+    } catch (err) {
+      this.log.warn(`Preparing next track ${up.id} failed: ${err.message}`);
+    } finally {
+      this.#prefetching = false;
+    }
+  }
+
+  async #sendNextToRenderer() {
+    const q = this.#queued;
+    if (!q || !this.cfg.gapless || this.#gaplessSupported === false) return;
+    try {
+      await this.#call('AVTransport', 'SetNextAVTransportURI', {
+        InstanceID: 0, NextURI: q.item.url, NextURIMetaData: q.item.metadata,
+      });
+      q.sentToRenderer = true;
+      if (this.#gaplessSupported === null) this.log.info('Renderer supports gapless playback (SetNextAVTransportURI)');
+      this.#gaplessSupported = true;
+    } catch (err) {
+      if (err.errorCode === '401' || err.errorCode === '602' || err.code === 'ENOSERVICE') {
+        this.#gaplessSupported = false;
+        this.log.info('Renderer has no SetNextAVTransportURI - next tracks start right after the current one ends');
+      } else {
+        this.log.debug('SetNextAVTransportURI failed:', err.message);
+      }
+    }
+  }
+
+  /** Has the renderer moved on to the track we queued with SetNextAVTransportURI? */
+  async #rendererAdvanced() {
+    const q = this.#queued;
+    if (!q?.sentToRenderer) return false;
+    const pos = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+    let uri = pos?.TrackURI;
+    if (!uri) uri = (await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 }))?.CurrentURI;
+    // Compare by our stream path: renderers sometimes rewrite host or escaping.
+    return Boolean(uri && uri.includes(q.item.streamPath));
   }
 
   /** The renderer accepted the URL but never started playing: try the next format. */
@@ -275,6 +385,8 @@ export class Renderer extends Player {
   async doStop() {
     this.#loadSeq++; // cancel any pending load
     this.#current = null;
+    this.#queued = null;
+    this.#advanced = null;
     this.#stopPolling();
     this.#expectStop = true;
     const ok = await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
@@ -383,7 +495,11 @@ export class Renderer extends Player {
   // subscriptions, and eventing needs an inbound callback port through NAT/firewalls.
   #startPolling() {
     this.#stopPolling();
-    this.#pollTimer = setInterval(() => this.#poll().catch(() => {}), this.cfg.pollIntervalMs);
+    this.#pollTimer = setInterval(() => {
+      if (this.#polling) return; // a slow renderer must not stack up overlapping polls
+      this.#polling = true;
+      this.#poll().catch((err) => this.log.debug('Poll failed:', err.message)).finally(() => { this.#polling = false; });
+    }, this.cfg.pollIntervalMs);
     this.#pollTimer.unref();
   }
 
@@ -410,6 +526,18 @@ export class Renderer extends Player {
       if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
       if (this.status === PLAYER_STATUSES.PAUSED) await this.notifyExternalStateChange(PLAYER_STATUSES.PLAYING);
+
+      if (await this.#rendererAdvanced()) {
+        // Renderer played on into the queued track. Advance YouTube's queue to match;
+        // doPlay() sees #advanced and adopts the track instead of reloading it.
+        this.#stopPolling();
+        this.#advanced = this.#queued;
+        this.#queued = null;
+        this.log.info('Renderer continued into the next track');
+        if (!(await this.next())) this.#advanced = null;
+        return;
+      }
+      this.#maintainNext().catch(() => {}); // background: don't hold up polling
     } else if (state === 'PAUSED_PLAYBACK') {
       if (this.status === PLAYER_STATUSES.PLAYING) await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
     } else if ((state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') && this.#sawPlaying

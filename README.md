@@ -32,6 +32,12 @@ With `auto` (the default), upnpTube tries them in that order, skipping formats t
 
 The renderer gets a short `http://<host>:8000/stream/<random>.m4a` URL. upnpTube proxies it to YouTube's HTTPS stream and passes Range requests through, so seeking works. Most renderers can't do HTTPS and many choke on YouTube's 1–2 KB URLs.
 
+### Next track prepared in advance, gapless playback
+
+While a song plays, upnpTube prepares the next one from the YouTube queue, or the autoplay pick: it resolves the video and, for `mp4`/`flac`, downloads and builds the file. Skipping to it, or the song ending, then starts it right away.
+
+If the renderer supports `SetNextAVTransportURI`, the next track is also handed to it in advance, so it plays on with no gap (useful for live albums and mixes). upnpTube notices the switch and moves the YouTube queue along. Renderers without it simply get the prepared track the moment the current one ends. If you edit the queue in the app, the prepared track is replaced. Turn it off with `PREFETCH=false` or `GAPLESS=false`.
+
 ## Quick start (Docker, Linux host)
 
 ```sh
@@ -96,6 +102,8 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
+| `PREFETCH` | `true` | Prepare the next track while the current one plays |
+| `GAPLESS` | `true` | Queue it on the renderer with `SetNextAVTransportURI` when supported |
 | `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
 
 ## Troubleshooting
@@ -125,7 +133,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
 - **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux, or FLAC), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
 - **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
-- **Queue and autoplay:** end of track is detected and the YouTube queue advances.
+- **Queue and autoplay:** end of track is detected and the YouTube queue advances. The next track is prepared in advance, and played gaplessly where the renderer supports it.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page** with a JSON API (`/api/renderers`), pairing codes and `/healthz`.

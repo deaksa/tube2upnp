@@ -97,4 +97,9 @@ export const config = Object.freeze({
   startTimeoutMs: int('START_TIMEOUT_MS', 12000),
 
   autoplayOnConnect: bool('AUTOPLAY', true),
+
+  // Prepare the next track in the queue while the current one plays (instant skip).
+  prefetch: bool('PREFETCH', true),
+  // Also hand it to the renderer with SetNextAVTransportURI for gapless playback.
+  gapless: bool('GAPLESS', true),
 });

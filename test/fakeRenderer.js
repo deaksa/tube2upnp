@@ -5,12 +5,14 @@ import http from 'node:http';
 const ACTIONS = {
   AVTransport: {
     SetAVTransportURI: [['InstanceID', 'in'], ['CurrentURI', 'in'], ['CurrentURIMetaData', 'in']],
+    SetNextAVTransportURI: [['InstanceID', 'in'], ['NextURI', 'in'], ['NextURIMetaData', 'in']],
+    GetMediaInfo: [['InstanceID', 'in'], ['CurrentURI', 'out']],
     Play: [['InstanceID', 'in'], ['Speed', 'in']],
     Pause: [['InstanceID', 'in']],
     Stop: [['InstanceID', 'in']],
     Seek: [['InstanceID', 'in'], ['Unit', 'in'], ['Target', 'in']],
     GetTransportInfo: [['InstanceID', 'in'], ['CurrentTransportState', 'out'], ['CurrentTransportStatus', 'out'], ['CurrentSpeed', 'out']],
-    GetPositionInfo: [['InstanceID', 'in'], ['TrackDuration', 'out'], ['RelTime', 'out']],
+    GetPositionInfo: [['InstanceID', 'in'], ['TrackDuration', 'out'], ['TrackURI', 'out'], ['RelTime', 'out']],
   },
   RenderingControl: {
     GetVolume: [['InstanceID', 'in'], ['Channel', 'in'], ['CurrentVolume', 'out']],
@@ -26,9 +28,10 @@ const scpd = (svc) => `<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:se
     args.map(([n, d]) => `<argument><name>${n}</name><direction>${d}</direction></argument>`).join('')
   }</argumentList></action>`).join('')}</actionList></scpd>`;
 
-export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [] } = {}) {
+export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [], noGapless = false } = {}) {
   const calls = [];
-  const state = { transport: 'STOPPED', volume: 30 };
+  const state = { transport: 'STOPPED', volume: 30, currentUri: '', nextUri: '' };
+  const unescape = (x) => x.replace(/&amp;/g, '&');
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (d) => { body += d; });
@@ -55,11 +58,20 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         // Some real renderers answer errors with a bare 500 and no UPnPError body.
         if (bareFaultOn.includes(action)) return res.writeHead(500).end('<html>Internal Error</html>');
         let out = '';
+        if (action === 'SetNextAVTransportURI' && noGapless) {
+          res.writeHead(500, { 'Content-Type': 'text/xml' });
+          return res.end('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault>'
+            + '<detail><UPnPError xmlns="urn:schemas-upnp-org:control-1-0"><errorCode>401</errorCode>'
+            + '<errorDescription>Invalid Action</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>');
+        }
+        if (action === 'SetAVTransportURI') state.currentUri = unescape(/<CurrentURI>(.*?)<\/CurrentURI>/.exec(body)?.[1] ?? '');
+        if (action === 'SetNextAVTransportURI') state.nextUri = unescape(/<NextURI>(.*?)<\/NextURI>/.exec(body)?.[1] ?? '');
         if (action === 'Play') state.transport = neverPlay ? 'STOPPED' : 'PLAYING';
         if (action === 'Stop') state.transport = 'STOPPED';
         if (action === 'Pause') state.transport = 'PAUSED_PLAYBACK';
         if (action === 'GetTransportInfo') out = `<CurrentTransportState>${state.transport}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>`;
-        if (action === 'GetPositionInfo') out = '<TrackDuration>0:03:30</TrackDuration><RelTime>0:01:05</RelTime>';
+        if (action === 'GetPositionInfo') out = `<TrackDuration>0:03:30</TrackDuration><TrackURI>${state.currentUri}</TrackURI><RelTime>0:01:05</RelTime>`;
+        if (action === 'GetMediaInfo') out = `<CurrentURI>${state.currentUri}</CurrentURI>`;
         if (action === 'GetVolume') out = `<CurrentVolume>${state.volume}</CurrentVolume>`;
         if (action === 'GetProtocolInfo') out = `<Source></Source><Sink>${sink}</Sink>`;
         res.setHeader('Content-Type', 'text/xml');
@@ -70,7 +82,9 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
       res.writeHead(404).end();
     });
   });
+  // Simulate the renderer reaching the end of the track and playing on into the queued one.
+  const advance = () => { state.currentUri = state.nextUri; state.nextUri = ''; state.transport = 'PLAYING'; };
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
-    server, calls, state, location: `http://127.0.0.1:${server.address().port}/desc.xml`,
+    server, calls, state, advance, location: `http://127.0.0.1:${server.address().port}/desc.xml`,
   })));
 }
