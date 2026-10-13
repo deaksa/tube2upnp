@@ -1,36 +1,43 @@
 {
   "name": "upnptube",
-  "version": "0.0.1",
-  "description": "Cast from YouTube app to DLNA/UPNP renderers",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "version": "2.0.0",
+  "description": "Cast from the YouTube / YouTube Music apps to DLNA/UPnP renderers",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "upnpTube": "src/index.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/mas94uk/upnpTube.git"
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test 'test/**/*.test.js'",
+    "lint": "eslint src test"
   },
   "keywords": [
     "youtube",
+    "youtube-music",
     "dlna",
     "upnp",
     "cast",
     "audio",
     "music"
   ],
-  "author": "Mark Smith",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/mas94uk/upnpTube/issues"
-  },
-  "homepage": "https://github.com/mas94uk/upnpTube#readme",
+  "author": "Mark Smith (original), upnpTube contributors",
+  "license": "GPL-3.0-only",
   "dependencies": {
-    "http-proxy": "^1.18.1",
-    "node-ssdp": "^4.0.1",
+    "elementtree": "^0.1.7",
+    "node-persist": "^3.1.3",
     "upnp-mediarenderer-client": "^1.4.0",
-    "yt-cast-receiver": "git+https://git@github.com/mas94uk/yt-cast-receiver.git"
+    "yt-cast-receiver": "^2.1.0"
   },
-  "bin": {
-    "upnpTube": "./index.js"
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "globals": "^15.12.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

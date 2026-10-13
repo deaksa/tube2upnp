@@ -1,0 +1,19 @@
+services:
+  upnptube:
+    container_name: upnptube
+    build: .
+    image: upnptube:latest
+    # Host networking is required: SSDP/DIAL use multicast on the LAN.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - upnptube-data:/data
+    environment:
+      LOG_LEVEL: info
+      # ADVERTISE_IP: 192.168.1.10       # pin if auto-detection picks the wrong NIC
+      # RENDERER_EXCLUDE: "Samsung|LG"    # e.g. TVs that already have a native YouTube app
+      # TRANSCODE: auto                   # auto | always | never
+      # STATUS_PORT: 8080                 # 0 disables the status page
+
+volumes:
+  upnptube-data:
