@@ -75,5 +75,8 @@ export const config = Object.freeze({
   // How often to poll the renderer's transport state while something is playing (ms).
   pollIntervalMs: int('POLL_INTERVAL_MS', 2000),
 
+  // Retry as MP3 if the renderer hasn't started playing this long after Play (ms).
+  startTimeoutMs: int('START_TIMEOUT_MS', 12000),
+
   autoplayOnConnect: bool('AUTOPLAY', true),
 });

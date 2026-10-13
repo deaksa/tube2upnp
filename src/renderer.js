@@ -1,14 +1,13 @@
 // One UPnP MediaRenderer exposed as one YouTube cast receiver.
 
-import { promisify } from 'node:util';
-import MediaRendererClient from 'upnp-mediarenderer-client';
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
 import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
+import { callAction, parseSink, UpnpError } from './soap.js';
+
 
 export class Renderer extends Player {
-  #client;
   #call;
   #receiver = null;
   #pollTimer = null;
@@ -17,6 +16,8 @@ export class Renderer extends Player {
   #loadSeq = 0;            // invalidates stale async loads when the user skips quickly
   #protocols = null;
   #ip = null;
+  #forceTranscode = false; // learned: this renderer needs MP3
+  #current = null;         // { video, transcode, loadedAt, fetched, retried }
 
   /**
    * @param {object} p
@@ -70,7 +71,7 @@ export class Renderer extends Player {
     this.description = desc;
 
     if (!desc.services['urn:upnp-org:serviceId:AVTransport']) {
-      this.log.warn(`"${desc.friendlyName}" has no AVTransport service - skipping`);
+      this.log.warn(`"${desc.friendlyName}" has no AVTransport service - skipping (${this.location})`);
       return false;
     }
 
@@ -85,14 +86,15 @@ export class Renderer extends Player {
       .trim();
     this.log = this.baseLog.child(`[${desc.friendlyName}]`);
 
-    this.#client = new MediaRendererClient(this.location);
-    this.#client.deviceDescription = desc; // pre-seed: handles embedded devices & odd serviceIds
-    // Without this listener, any eventing/SOAP error emitted by the client crashes the process.
-    this.#client.on('error', (err) => this.log.warn('UPnP client error:', err.message));
-    this.#call = promisify(this.#client.callAction.bind(this.#client));
+    this.#call = (svc, action, params) => {
+      const service = desc.services[`urn:upnp-org:serviceId:${svc}`];
+      if (!service) return Promise.reject(new UpnpError(`${svc} service not provided`, { code: 'ENOSERVICE' }));
+      return callAction(service, action, params);
+    };
 
     try {
-      this.#protocols = await promisify(this.#client.getSupportedProtocols.bind(this.#client))();
+      const r = await this.#call('ConnectionManager', 'GetProtocolInfo', {});
+      this.#protocols = parseSink(r.Sink);
       this.log.debug('Sink protocols:', this.#protocols.map((p) => p.contentFormat).join(', '));
     } catch (err) {
       this.log.debug('GetProtocolInfo failed (will assume source format works):', err.message);
@@ -154,15 +156,26 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
+    return this.#load(video, position, false);
+  }
+
+  async #load(video, position, forceTranscode) {
     const seq = ++this.#loadSeq;
     this.#stopPolling();
     try {
       const info = await this.resolver.resolve(video.id);
       if (seq !== this.#loadSeq) return false; // superseded by a newer play()
 
-      const transcode = this.#shouldTranscode(info.mime);
+      const transcode = forceTranscode || this.#shouldTranscode(info.mime);
       const mime = transcode ? 'audio/mpeg' : info.mime;
-      const path = this.media.register({ videoId: video.id, transcode, ext: info.ext });
+      const current = { video, transcode, loadedAt: Date.now(), fetched: false, retried: forceTranscode };
+      const path = this.media.register({
+        videoId: video.id, transcode, ext: info.ext,
+        onRequest: () => {
+          if (!current.fetched) this.log.info(`Renderer started fetching the ${transcode ? 'MP3' : info.ext} stream`);
+          current.fetched = true;
+        },
+      });
       const url = `http://${this.#ip}:${this.cfg.mediaPort}${path}`;
       const dlna = transcode
         ? 'DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000'
@@ -190,12 +203,13 @@ export class Renderer extends Player {
         await this.#safeCall('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
       }
 
+      this.#current = current;
       this.nowPlaying = { videoId: video.id, title: info.title, artist: info.artist, duration: info.duration, transcode };
       this.lastError = null;
       this.#sawPlaying = false;
       this.#expectStop = false;
       this.#startPolling();
-      this.log.info(`Playing "${info.title}"${transcode ? ' (MP3 transcode)' : ''}`);
+      this.log.info(`Sent "${info.title}" to renderer${transcode ? ' (MP3 transcode)' : ` (${info.mime})`}`);
       return true;
     } catch (err) {
       this.lastError = err.message;
@@ -203,6 +217,23 @@ export class Renderer extends Player {
       this.#expectStop = false;
       return false;
     }
+  }
+
+  /** The renderer accepted the URL but never started playing: retry once as MP3. */
+  async #handleStartFailure() {
+    const c = this.#current;
+    const why = c.fetched ? 'fetched the stream but never started playing' : 'never requested the stream';
+    if (!c.transcode && !c.retried && this.cfg.transcode === 'auto') {
+      this.log.warn(`Renderer ${why} - retrying as MP3 and using MP3 for this renderer from now on`);
+      this.#forceTranscode = true;
+      await this.#load(c.video, 0, true);
+      return;
+    }
+    this.lastError = `Renderer ${why}`;
+    this.log.error(`${this.lastError}.${c.fetched ? '' : ' Check that it can reach '
+      + `http://${this.#ip}:${this.cfg.mediaPort} (firewall, ADVERTISE_IP).`}`);
+    this.#stopPolling();
+    await this.notifyExternalStateChange(PLAYER_STATUSES.STOPPED);
   }
 
   async doPause() {
@@ -215,6 +246,7 @@ export class Renderer extends Player {
 
   async doStop() {
     this.#loadSeq++; // cancel any pending load
+    this.#current = null;
     this.#stopPolling();
     this.#expectStop = true;
     const ok = await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
@@ -262,7 +294,7 @@ export class Renderer extends Player {
   // ------------------------------------------------------------------ internals
 
   #shouldTranscode(mime) {
-    if (this.cfg.transcode === 'always') return true;
+    if (this.cfg.transcode === 'always' || this.#forceTranscode) return true;
     if (this.cfg.transcode === 'never') return false;
     const accepted = sinkAccepts(this.#protocols, mime);
     if (accepted === false) {
@@ -322,6 +354,15 @@ export class Renderer extends Player {
     if (this.#expectStop) return;
     const state = await this.#transportState();
     if (!state) return;
+
+    // If the renderer hasn't reached PLAYING well after Play, assume it can't handle
+    // the stream (typically YouTube's fragmented DASH M4A) and retry as MP3.
+    if (!this.#sawPlaying && state !== 'PLAYING' && this.#current
+        && this.status === PLAYER_STATUSES.PLAYING
+        && Date.now() - this.#current.loadedAt > this.cfg.startTimeoutMs) {
+      await this.#handleStartFailure();
+      return;
+    }
 
     if (state === 'PLAYING') {
       this.#sawPlaying = true;

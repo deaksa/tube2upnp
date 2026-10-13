@@ -65,6 +65,7 @@ export class MediaServer {
     }
     this.log.debug(`${req.method} ${req.url} range=${req.headers.range ?? '-'} from ${req.socket.remoteAddress}`);
 
+    if (req.method === 'GET') entry.onRequest?.();
     const info = await this.resolver.resolve(entry.videoId);
     if (entry.transcode) return this.#transcode(req, res, info);
     return this.#proxy(req, res, entry, info, true);

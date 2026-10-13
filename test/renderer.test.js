@@ -22,7 +22,7 @@ function setup(fake, overrides = {}) {
   const registered = [];
   const config = {
     nameTemplate: '🔊 {name}', include: null, exclude: null, transcode: 'auto',
-    advertiseIp: null, mediaPort: 8000, pollIntervalMs: 50, autoplayOnConnect: true,
+    advertiseIp: null, mediaPort: 8000, pollIntervalMs: 50, startTimeoutMs: 200, autoplayOnConnect: true,
     logLevel: 'none', dataDir: mkdtempSync(path.join(tmpdir(), 'upnptube-')), ...overrides,
   };
   const r = new Renderer({
@@ -31,8 +31,8 @@ function setup(fake, overrides = {}) {
       config,
       logger: new Logger('none'),
       resolver: { resolve: async () => ({ url: 'https://example/v', ext: 'm4a', mime: 'audio/mp4',
-        headers: {}, title: 'Song & Dance', artist: 'Band', album: '', thumbnail: 'https://i/x.jpg', duration: 210 }) },
-      mediaServer: { register: (e) => { registered.push(e); return `/stream/${'a'.repeat(32)}.${e.transcode ? 'mp3' : e.ext}`; } },
+        headers: {}, title: 'Song & Dance – Pitypang ő ű', artist: 'Band', album: '', thumbnail: 'https://i/x.jpg', duration: 210 }) },
+      mediaServer: { register: (e) => { e.onRequest?.(); registered.push(e); return `/stream/${'a'.repeat(32)}.${e.transcode ? 'mp3' : e.ext}`; } },
       createReceiver: (_p, opts) => { receiverOpts = opts; return new FakeReceiver(); },
     },
   });
@@ -82,4 +82,30 @@ test('exclude filter skips renderer', async (t) => {
   t.after(() => fake.server.close());
   const { r } = setup(fake, { exclude: /living/i });
   assert.equal(await r.init(), false);
+});
+
+test('renderer errors without UPnP fault body do not crash, and UTF-8 bodies have byte-accurate length', async (t) => {
+  const fake = await startFakeRenderer({ bareFaultOn: ['Pause'] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.equal(await r.doPlay({ id: 'dQw4w9WgXcQ' }, 0), true);
+  assert.equal(await r.doPause(), false); // reported as failure, process survives
+  for (const c of fake.calls) assert.equal(c.contentLength, c.bytes, `${c.action} Content-Length`);
+  await r.destroy();
+});
+
+test('falls back to MP3 when the renderer never starts playing', async (t) => {
+  const fake = await startFakeRenderer({ neverPlay: true });
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake);
+  await r.init();
+  // Player.status must be PLAYING for the watchdog; drive it the way yt-cast-receiver would.
+  r.setLogger(new Logger('none'));
+  await r.play({ id: 'dQw4w9WgXcQ', client: { key: 'YT' } }, 0);
+  await new Promise((res) => setTimeout(res, 600));
+  assert.equal(registered.length, 2);
+  assert.equal(registered[0].transcode, false);
+  assert.equal(registered[1].transcode, true);
+  await r.destroy();
 });

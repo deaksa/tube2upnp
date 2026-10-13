@@ -26,7 +26,7 @@ const scpd = (svc) => `<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:se
     args.map(([n, d]) => `<argument><name>${n}</name><direction>${d}</direction></argument>`).join('')
   }</argumentList></action>`).join('')}</actionList></scpd>`;
 
-export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*' } = {}) {
+export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [] } = {}) {
   const calls = [];
   const state = { transport: 'STOPPED', volume: 30 };
   const server = http.createServer((req, res) => {
@@ -51,9 +51,11 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
       const c = /^\/ctl\/(\w+)$/.exec(req.url);
       if (c) {
         const action = (req.headers.soapaction || '').replace(/"/g, '').split('#')[1];
-        calls.push({ service: c[1], action, body });
+        calls.push({ service: c[1], action, body, contentLength: Number(req.headers['content-length']), bytes: Buffer.byteLength(body) });
+        // Some real renderers answer errors with a bare 500 and no UPnPError body.
+        if (bareFaultOn.includes(action)) return res.writeHead(500).end('<html>Internal Error</html>');
         let out = '';
-        if (action === 'Play') state.transport = 'PLAYING';
+        if (action === 'Play') state.transport = neverPlay ? 'STOPPED' : 'PLAYING';
         if (action === 'Stop') state.transport = 'STOPPED';
         if (action === 'Pause') state.transport = 'PAUSED_PLAYBACK';
         if (action === 'GetTransportInfo') out = `<CurrentTransportState>${state.transport}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>`;

@@ -71,6 +71,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
 | `DATA_DIR` | `./data` (`/data` in Docker) | Per-renderer screen IDs, so phones remember the receivers |
+| `START_TIMEOUT_MS` | `12000` | Retry as MP3 if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
 | `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
@@ -85,7 +86,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 **It casts, but nothing plays.**
 - Run with `LOG_LEVEL=debug`. You'll see whether the renderer ever requests `/stream/...`.
 - If it never connects, set `ADVERTISE_IP` to the LAN address and check the firewall on `MEDIA_PORT`.
-- If it connects but stops at once, try `TRANSCODE=always`.
+- If the renderer accepts the URL but doesn't start within `START_TIMEOUT_MS` (12 s), upnpTube retries the track as MP3 and keeps using MP3 for that renderer until restart. Many renderers advertise `audio/mp4` but can't play YouTube's fragmented DASH M4A. If that happens every time, set `TRANSCODE=always` so playback starts right away.
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).** Update yt-dlp first, which happens automatically by default. If the server's IP is flagged by YouTube, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
 
@@ -97,6 +98,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 - **yt-dlp:** current version with JS-runtime support, run via `execFile` with strict video-ID validation. The original passed the ID through a shell (command injection). Results are cached, concurrent lookups are coalesced, expired URLs are re-resolved, and yt-dlp self-updates.
 - **Separate state per renderer:** the library's default store is shared, which would let a cast land on the wrong speaker.
 - **Embedded MediaRenderers** (Sonos, Denon/Marantz, Yamaha, …) and non-standard serviceIds are supported. This fixes the "AVTransport not provided by device" crash.
+- **Own SOAP client:** replaces `upnp-device-client`, which crashed the process on fault responses without `<errorDescription>` and sent a wrong `Content-Length` for non-ASCII (accented) metadata.
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
 - **MP3 transcoding** when a renderer doesn't support the source format.
