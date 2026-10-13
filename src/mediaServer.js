@@ -196,8 +196,28 @@ export class MediaServer {
     return this.#once(this.#downloadJobs, videoId, async () => {
       const dest = path.join(this.cacheDir, `${videoId}.source`);
       const started = Date.now();
-      const info = await this.resolver.resolve(videoId);
-      await this.download(videoId, info, dest);
+      const delays = this.cfg.downloadRetryDelaysMs ?? [2000, 5000];
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const info = await this.resolver.resolve(videoId);
+          await this.download(videoId, info, dest);
+          break;
+        } catch (err) {
+          // A 403 on a URL that's seconds old isn't expiry: YouTube handed out a format URL
+          // it won't serve (it varies per extraction). Drop it and extract afresh.
+          this.resolver.invalidate(videoId);
+          if (attempt >= delays.length) {
+            if (err.forbidden) {
+              this.log.warn('YouTube keeps refusing downloads (403). If this persists, see README '
+                + '"yt-dlp errors" - a PO-token provider or cookies usually fix it.');
+            }
+            throw err;
+          }
+          this.log.warn(`${err.message.replace(/^yt-dlp download failed for \S+: /, 'Download failed: ')}`
+            + ` - retrying with a fresh extraction in ${delays[attempt] / 1000}s (${attempt + 1}/${delays.length})`);
+          await new Promise((r) => setTimeout(r, delays[attempt]));
+        }
+      }
       const { size } = await fsp.stat(dest);
       this.log.info(`Downloaded ${videoId} (${(size / 1048576).toFixed(1)} MB) in ${Date.now() - started} ms`);
       return dest;

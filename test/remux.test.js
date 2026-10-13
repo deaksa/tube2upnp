@@ -120,6 +120,48 @@ test('mp3 transcode', { skip: !hasFfmpeg }, async (t) => {
   assert.equal(probe(out, 'stream=codec_name'), 'mp3');
 });
 
+test('download retries with a fresh extraction after a 403', { skip: !hasFfmpeg }, async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'retry-'));
+  let resolves = 0;
+  let invalidations = 0;
+  let attempts = 0;
+  const ms = new MediaServer(
+    { mediaPort: 0, ffmpegPath: 'ffmpeg', cacheDir: path.join(dir, 'cache'), downloadRetryDelaysMs: [10, 10] },
+    { resolve: async () => ({ url: `u${++resolves}`, headers: {} }), invalidate: () => { invalidations++; } },
+    new Logger('none'),
+    {
+      download: async (_id, _info, dest) => {
+        if (++attempts < 3) {
+          const e = new Error('yt-dlp download failed for x: ERROR: HTTP Error 403: Forbidden');
+          e.forbidden = true;
+          throw e;
+        }
+        writeFileSync(dest, 'audio');
+      },
+    });
+  await ms.start();
+  t.after(() => ms.stop());
+  // The stub "audio" isn't real AAC, so the remux after the download fails - that's fine here.
+  await ms.prepare({ videoId: 'ggggggggggg', format: 'mp4', ext: 'm4a' }).catch(() => {});
+  assert.equal(attempts, 3);
+  assert.equal(resolves, 3, 'each retry uses a fresh extraction');
+  assert.equal(invalidations, 2);
+});
+
+test('download gives up after the configured retries', { skip: !hasFfmpeg }, async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'retry-'));
+  let attempts = 0;
+  const ms = new MediaServer(
+    { mediaPort: 0, ffmpegPath: 'ffmpeg', cacheDir: path.join(dir, 'cache'), downloadRetryDelaysMs: [10] },
+    { resolve: async () => ({ url: 'u', headers: {} }), invalidate: () => {} },
+    new Logger('none'),
+    { download: async () => { attempts++; throw new Error('nope'); } });
+  await ms.start();
+  t.after(() => ms.stop());
+  await assert.rejects(ms.prepare({ videoId: 'hhhhhhhhhhh', format: 'mp4', ext: 'm4a' }), /nope/);
+  assert.equal(attempts, 2);
+});
+
 test('range parsing', () => {
   assert.deepEqual(parseRange('bytes=0-', 10), { start: 0, end: 9 });
   assert.deepEqual(parseRange('bytes=-3', 10), { start: 7, end: 9 });

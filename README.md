@@ -118,7 +118,12 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 - If it never connects, set `ADVERTISE_IP` to the LAN address and check the firewall on `MEDIA_PORT`.
 - With `OUTPUT_FORMAT=auto`, a renderer that doesn't start is tried with the next format, and the winner is remembered. To find the right one by hand, set `OUTPUT_FORMAT` to `mp4`, then `adts`, then `flac`, then `mp3`, and keep the first that plays.
 
-**yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).** Update yt-dlp first, which happens automatically by default. If the server's IP is flagged by YouTube, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
+**yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).**
+- Occasional `HTTP Error 403` on download is normal. YouTube sometimes hands out a format URL it then refuses to serve. upnpTube discards it and retries with a fresh lookup (two retries, after 2 s and 5 s), which almost always succeeds.
+- If 403s happen on most tracks:
+  - Update yt-dlp first. This happens automatically by default.
+  - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.
+  - If the server's IP is flagged, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
 
 **Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, upnpTube restarts the stream from the new position, so a seek takes a second or two longer.
 

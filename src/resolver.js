@@ -134,11 +134,11 @@ export function scheduleYtdlpUpdates(config, logger) {
 }
 
 /**
- * Download the resolved audio with yt-dlp itself. ffmpeg fetching googlevideo directly
+ * Download the resolved audio with yt-dlp itself (one attempt; MediaServer retries). ffmpeg fetching googlevideo directly
  * gets 403s for some clients/formats (chunking rules, IP-bound URLs); yt-dlp knows how
  * to download YouTube, so let it, and only remux the local file with ffmpeg.
  */
-export async function downloadWithYtdlp(config, logger, videoId, info, dest) {
+export async function downloadWithYtdlp(config, _logger, videoId, info, dest) {
   const common = [
     '--no-playlist', '--no-warnings', '--no-progress', '--fixup', 'never', '--no-part',
     '--force-overwrites', '-o', dest,
@@ -149,21 +149,19 @@ export async function downloadWithYtdlp(config, logger, videoId, info, dest) {
   const run = (args) => execFileP(config.ytdlpPath, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
   const tail = (err) => (err.stderr || err.message || '').toString().trim().split('\n').slice(-2).join(' | ');
 
-  if (info.rawJson) {
-    const jsonFile = `${dest}.info.json`;
-    await writeFile(jsonFile, info.rawJson);
-    try {
-      await run(['--load-info-json', jsonFile, '-f', fmt, ...common]);
-      return;
-    } catch (err) {
-      logger.warn(`yt-dlp download from cached info failed (${tail(err)}), retrying with fresh extraction`);
-    } finally {
-      await rm(jsonFile, { force: true });
-    }
-  }
+  // Reuse the JSON from resolve() so this is a pure download, not a second extraction.
+  const jsonFile = `${dest}.info.json`;
+  const args = info.rawJson
+    ? ['--load-info-json', jsonFile, '-f', fmt, ...common]
+    : ['-f', config.ytdlpFormat, ...common, '--', `https://www.youtube.com/watch?v=${videoId}`];
   try {
-    await run(['-f', config.ytdlpFormat, ...common, '--', `https://www.youtube.com/watch?v=${videoId}`]);
+    if (info.rawJson) await writeFile(jsonFile, info.rawJson);
+    await run(args);
   } catch (err) {
-    throw new Error(`yt-dlp download failed for ${videoId}: ${tail(err)}`);
+    const e = new Error(`yt-dlp download failed for ${videoId}: ${tail(err)}`);
+    e.forbidden = /HTTP Error 403/.test(tail(err));
+    throw e;
+  } finally {
+    await rm(jsonFile, { force: true });
   }
 }
