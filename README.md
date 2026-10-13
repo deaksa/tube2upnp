@@ -90,7 +90,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).** Update yt-dlp first, which happens automatically by default. If the server's IP is flagged by YouTube, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
 
-**Seeking doesn't work.** It isn't possible while transcoding, and some renderers don't implement `Seek`.
+**Seeking.** For direct (M4A) streams the renderer seeks natively, if it implements `Seek`. While transcoding, upnpTube restarts the MP3 stream from the new position, so a seek takes a second or two longer.
 
 ## What changed in v2
 
@@ -101,7 +101,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 - **Own SOAP client:** replaces `upnp-device-client`, which crashed the process on fault responses without `<errorDescription>` and sent a wrong `Content-Length` for non-ASCII (accented) metadata.
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
-- **MP3 transcoding** when a renderer doesn't support the source format.
+- **MP3 transcoding** when a renderer doesn't support the source format, with seeking (the stream is restarted at the new offset).
 - **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.

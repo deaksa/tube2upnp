@@ -47,7 +47,7 @@ export class MediaServer {
 
   /**
    * Register a stream and return the path (without host) to hand to a renderer.
-   * @param {{videoId:string, transcode:boolean, ext:string}} entry
+   * @param {{videoId:string, transcode:boolean, ext:string, startAt?:number, onRequest?:Function}} entry
    */
   register(entry) {
     const token = randomBytes(16).toString('hex');
@@ -67,7 +67,7 @@ export class MediaServer {
 
     if (req.method === 'GET') entry.onRequest?.();
     const info = await this.resolver.resolve(entry.videoId);
-    if (entry.transcode) return this.#transcode(req, res, info);
+    if (entry.transcode) return this.#transcode(req, res, info, entry);
     return this.#proxy(req, res, entry, info, true);
   }
 
@@ -118,7 +118,7 @@ export class MediaServer {
     });
   }
 
-  #transcode(req, res, info) {
+  #transcode(req, res, info, entry) {
     res.writeHead(200, { 'Content-Type': 'audio/mpeg', ...this.#dlnaHeaders(false) });
     if (req.method === 'HEAD') return res.end();
 
@@ -127,6 +127,8 @@ export class MediaServer {
       '-hide_banner', '-loglevel', 'error',
       ...(hdrs ? ['-headers', hdrs] : []),
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
+      // Input-side -ss: ffmpeg range-requests from the offset instead of decoding from 0.
+      ...(entry.startAt > 0 ? ['-ss', String(entry.startAt)] : []),
       '-i', info.url,
       '-vn', '-c:a', 'libmp3lame', '-b:a', this.cfg.mp3Bitrate, '-f', 'mp3', 'pipe:1',
     ];

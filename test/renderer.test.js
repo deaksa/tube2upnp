@@ -109,3 +109,30 @@ test('falls back to MP3 when the renderer never starts playing', async (t) => {
   assert.equal(registered[1].transcode, true);
   await r.destroy();
 });
+
+test('seeking while transcoding restarts the MP3 stream at the offset', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake, { transcode: 'always' });
+  await r.init();
+  await r.doPlay({ id: 'dQw4w9WgXcQ' }, 0);
+  assert.equal(await r.doSeek(95.7), true);
+  assert.equal(registered.length, 2);
+  assert.equal(registered[1].transcode, true);
+  assert.equal(registered[1].startAt, 95);
+  assert.equal(await r.doGetPosition(), 95 + 65); // offset + renderer RelTime (fake reports 0:01:05)
+  assert.equal(await r.doGetDuration(), 210);
+  assert.ok(!fake.calls.some((c) => c.action === 'Seek'), 'no AVTransport Seek on a transcoded stream');
+  await r.destroy();
+});
+
+test('casting mid-video while transcoding starts the stream at that position', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, registered } = setup(fake, { transcode: 'always' });
+  await r.init();
+  await r.doPlay({ id: 'dQw4w9WgXcQ' }, 36);
+  assert.equal(registered[0].startAt, 36);
+  assert.match(fake.calls.find((c) => c.action === 'SetAVTransportURI').body, /duration=&quot;0:02:54\.000&quot;/);
+  await r.destroy();
+});

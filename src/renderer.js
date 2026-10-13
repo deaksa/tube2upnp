@@ -168,9 +168,11 @@ export class Renderer extends Player {
 
       const transcode = forceTranscode || this.#shouldTranscode(info.mime);
       const mime = transcode ? 'audio/mpeg' : info.mime;
-      const current = { video, transcode, loadedAt: Date.now(), fetched: false, retried: forceTranscode };
+      // A transcoded MP3 stream can't be byte-range seeked, so start ffmpeg at the offset instead.
+      const startAt = transcode && position > 1 ? Math.floor(position) : 0;
+      const current = { video, transcode, startAt, loadedAt: Date.now(), fetched: false, retried: forceTranscode };
       const path = this.media.register({
-        videoId: video.id, transcode, ext: info.ext,
+        videoId: video.id, transcode, ext: info.ext, startAt,
         onRequest: () => {
           if (!current.fetched) this.log.info(`Renderer started fetching the ${transcode ? 'MP3' : info.ext} stream`);
           current.fetched = true;
@@ -191,7 +193,7 @@ export class Renderer extends Player {
         CurrentURIMetaData: buildDidl({
           url, protocolInfo,
           title: info.title, artist: info.artist, album: info.album,
-          albumArt: info.thumbnail, duration: info.duration,
+          albumArt: info.thumbnail, duration: Math.max(0, info.duration - startAt),
           isVideo: mime.startsWith('video/'),
         }),
       });
@@ -255,9 +257,12 @@ export class Renderer extends Player {
   }
 
   async doSeek(position) {
-    if (this.nowPlaying?.transcode) {
-      this.log.warn('Seeking is not supported while transcoding');
-      return false;
+    const c = this.#current;
+    if (c?.transcode) {
+      // Restart the MP3 stream from the new position. Takes a moment longer than a
+      // native seek (ffmpeg has to reconnect), but works on every renderer.
+      this.log.info(`Seek to ${Math.floor(position)}s by restarting the MP3 stream`);
+      return this.#load(c.video, position, true);
     }
     return this.#ok('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
   }
@@ -282,10 +287,13 @@ export class Renderer extends Player {
 
   async doGetPosition() {
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
-    return r ? parseHms(r.RelTime) : 0;
+    // The renderer counts from the start of the stream it got; add our ffmpeg offset.
+    return (r ? parseHms(r.RelTime) : 0) + (this.#current?.startAt ?? 0);
   }
 
   async doGetDuration() {
+    // While transcoding the renderer only knows the (remaining) stream length, if anything.
+    if (this.#current?.transcode && this.nowPlaying?.duration) return this.nowPlaying.duration;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     const d = r ? parseHms(r.TrackDuration) : 0;
     return d || this.nowPlaying?.duration || 0;
