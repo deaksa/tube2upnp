@@ -1,0 +1,83 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { startStatusServer } from '../src/statusServer.js';
+import { Logger, recentLogs } from '../src/logger.js';
+
+function fakeRenderer() {
+  const calls = [];
+  return {
+    calls,
+    statusInfo: () => ({ id: 'r1', name: 'R1', format: { override: null } }),
+    setFormatOverride: async (f) => { calls.push(['format', f]); },
+    forgetLearnedFormat: async () => { calls.push(['forget']); },
+    getPairingCode: async () => '123456789012',
+  };
+}
+
+async function start(t, cfg = {}) {
+  const r = fakeRenderer();
+  const server = startStatusServer({ statusPort: 0, outputFormat: 'mp4', ...cfg },
+    { renderers: new Map([['r1', r]]), mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
+    new Logger('none'));
+  await new Promise((res) => server.once('listening', res));
+  t.after(() => server.close());
+  return { base: `http://127.0.0.1:${server.address().port}`, r };
+}
+
+const post = (url, body, headers = {}) => fetch(url, {
+  method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+});
+
+test('serves the page with a strict CSP and the status API', async (t) => {
+  const { base } = await start(t);
+  const page = await fetch(base + '/');
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.match(await page.text(), /Stats for nerds/);
+  const s = await (await fetch(base + '/api/status')).json();
+  assert.equal(s.renderers[0].id, 'r1');
+  const st = await (await fetch(base + '/api/stats')).json();
+  assert.ok('timers' in st && 'cache' in st);
+});
+
+test('format changes require the CSRF header and same origin', async (t) => {
+  const { base, r } = await start(t);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' })).status, 403);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' },
+    { 'X-Upnptube': '1', Origin: 'http://evil.example' })).status, 403);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' }, { 'X-Upnptube': '1' })).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: null }, { 'X-Upnptube': '1' })).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/forget-format', {}, { 'X-Upnptube': '1' })).status, 200);
+  assert.deepEqual(r.calls, [['format', 'flac'], ['format', null], ['forget']]);
+  assert.equal((await post(base + '/api/renderers/nope/format', {}, { 'X-Upnptube': '1' })).status, 404);
+});
+
+test('STATUS_TOKEN protects the API (header or query), not the page or health check', async (t) => {
+  const { base } = await start(t, { statusToken: 's3cret' });
+  assert.equal((await fetch(base + '/')).status, 200);
+  assert.equal((await fetch(base + '/healthz')).status, 200);
+  assert.equal((await fetch(base + '/api/status')).status, 401);
+  assert.equal((await fetch(base + '/api/status', { headers: { Authorization: 'Bearer wrong' } })).status, 401);
+  assert.equal((await fetch(base + '/api/status', { headers: { Authorization: 'Bearer s3cret' } })).status, 200);
+  assert.equal((await fetch(base + '/api/logs?token=s3cret')).status, 200);
+});
+
+test('logs: ring buffer and live stream', async (t) => {
+  const { base } = await start(t);
+  const log = new Logger('info', '[test]');
+  log.info('hello', { a: 1 });
+  log.debug('hidden at info level');
+  const last = recentLogs().at(-1);
+  assert.equal(last.text, 'hello { a: 1 }');
+  assert.equal(last.prefix, '[test]');
+
+  const ctrl = new AbortController();
+  const res = await fetch(`${base}/api/logs/stream?after=${last.id}`, { signal: ctrl.signal });
+  const reader = res.body.getReader();
+  setTimeout(() => log.warn('live line'), 50);
+  let buf = '';
+  while (!buf.includes('live line')) buf += new TextDecoder().decode((await reader.read()).value);
+  ctrl.abort();
+  assert.match(buf, /"level":"warn"/);
+  assert.doesNotMatch(buf, /hello/, 'only lines after the given id');
+});

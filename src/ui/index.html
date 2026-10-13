@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>upnpTube</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f2426'/%3E%3Cpath d='M12 9v14l11-7z' fill='%23ffb547'/%3E%3C/svg%3E">
+<style>
+  /* Brushed-aluminium faceplate with a smoked-glass display window. */
+  :root {
+    --chassis: #e4e5e6;
+    --plate: #f2f2f1;
+    --plate-edge: #c9cccf;
+    --ink: #1e2225;
+    --muted: #5d656b;
+    --glass: #1f2426;
+    --glass-edge: #0f1213;
+    --vfd: #ffb547;
+    --vfd-dim: #4a3a20;
+    --vfd-text: #f4ead8;
+    --led-on: #2f9e62;
+    --led-warn: #d9921e;
+    --led-err: #cf4336;
+    --focus: #2a6fdb;
+    --font: "Bahnschrift", "DIN Alternate", "D-DIN", "Barlow", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --chassis: #222528; --plate: #2c3034; --plate-edge: #3b4146;
+      --ink: #e6e8e9; --muted: #9aa3a9; --glass: #121516; --glass-edge: #050606;
+      --vfd-dim: #3a2e1a; --focus: #6aa2ff;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body {
+    margin: 0; font-family: var(--font); color: var(--ink); background: var(--chassis);
+    font-size: 16px; line-height: 1.45; font-variant-numeric: tabular-nums;
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button, select, input { font: inherit; color: inherit; }
+
+  /* Faceplate header: name on the left, input selector on the right */
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 2rem;
+    padding: 1rem clamp(1rem, 4vw, 2.5rem);
+    background: linear-gradient(180deg, var(--plate), var(--chassis));
+    border-bottom: 1px solid var(--plate-edge);
+  }
+  .brand { font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; margin: 0; }
+  .brand small { font-size: .8rem; font-weight: 400; color: var(--muted); margin-left: .5rem; letter-spacing: 0; }
+  nav { display: flex; gap: .4rem; margin-left: auto; overflow-x: auto; max-width: 100%; }
+  nav button {
+    display: inline-flex; align-items: center; gap: .5rem; padding: .45rem .9rem;
+    border: 1px solid var(--plate-edge); border-radius: 999px; background: var(--plate); cursor: pointer;
+    white-space: nowrap;
+  }
+  @media (max-width: 30rem) { nav { margin-left: 0; } nav button { padding: .4rem .7rem; font-size: .9rem; } }
+  nav button::before {
+    content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--plate-edge);
+    transition: background .2s, box-shadow .2s;
+  }
+  nav button[aria-selected="true"]::before { background: var(--vfd); box-shadow: 0 0 6px var(--vfd); }
+
+  main { padding: 1.5rem clamp(1rem, 4vw, 2.5rem) 3rem; max-width: 78rem; margin: 0 auto; }
+  section[hidden] { display: none; }
+  h2 { font-size: 1.1rem; font-weight: 600; margin: 2rem 0 .75rem; }
+  h2:first-child { margin-top: 0; }
+  .muted { color: var(--muted); }
+  .empty { padding: 2rem; border: 1px dashed var(--plate-edge); border-radius: .75rem; color: var(--muted); max-width: 42rem; }
+
+  /* Speakers */
+  .speaker {
+    display: grid; grid-template-columns: minmax(0, 1fr) 19rem; gap: 1rem;
+    padding: 1rem; margin-bottom: 1.25rem; background: var(--plate);
+    border: 1px solid var(--plate-edge); border-radius: 1rem;
+  }
+  @media (max-width: 52rem) { .speaker { grid-template-columns: 1fr; } }
+
+  .display {
+    display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 1rem; align-items: center;
+    padding: 1rem 1.25rem; border-radius: .6rem; min-height: 8.5rem;
+    background: radial-gradient(120% 140% at 20% 0%, #2a3134 0%, var(--glass) 60%);
+    border: 1px solid var(--glass-edge); box-shadow: inset 0 2px 12px rgba(0,0,0,.55);
+    color: var(--vfd-text);
+  }
+  .cover {
+    width: 6.5rem; aspect-ratio: 1; border-radius: .35rem; object-fit: cover;
+    background: #2a2f31; filter: saturate(.9);
+  }
+  @media (max-width: 40rem) { .display { grid-template-columns: 4.5rem minmax(0, 1fr); } .cover { width: 4.5rem; } }
+  .cover.none { display: grid; place-items: center; color: var(--vfd-dim); font-size: 2rem; }
+  .title { font-size: clamp(1.3rem, 2.4vw, 1.9rem); font-weight: 600; line-height: 1.2; margin: 0;
+    color: var(--vfd); text-shadow: 0 0 8px rgba(255,181,71,.35);
+    overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .artist { margin: .15rem 0 .6rem; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meter { display: flex; align-items: center; gap: .75rem; }
+  .segments { display: grid; grid-template-columns: repeat(40, 1fr); gap: 2px; flex: 1; height: .55rem; }
+  .segments i { background: var(--vfd-dim); border-radius: 1px; }
+  .segments i.on { background: var(--vfd); box-shadow: 0 0 4px rgba(255,181,71,.6); }
+  .time { font-size: .85rem; white-space: nowrap; opacity: .9; }
+  .next { margin-top: .5rem; font-size: .85rem; opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .idle .title { color: var(--vfd-text); opacity: .6; text-shadow: none; font-weight: 400; }
+
+  .controls { display: flex; flex-direction: column; gap: .7rem; }
+  .name { font-size: 1.15rem; font-weight: 600; margin: 0; display: flex; align-items: center; gap: .5rem; }
+  .led { width: .6rem; height: .6rem; border-radius: 50%; background: var(--plate-edge); flex: none; }
+  .led.on { background: var(--led-on); box-shadow: 0 0 6px var(--led-on); }
+  .led.warn { background: var(--led-warn); }
+  .led.err { background: var(--led-err); }
+  .device { font-size: .85rem; color: var(--muted); margin: -.5rem 0 0; }
+  .senders { font-size: .85rem; margin: 0; }
+  label.field { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
+  select {
+    padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--plate-edge);
+    background: var(--chassis); color: var(--ink);
+  }
+  .hint { font-size: .8rem; color: var(--muted); margin: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .btn {
+    padding: .45rem .8rem; border-radius: .5rem; border: 1px solid var(--plate-edge);
+    background: var(--chassis); cursor: pointer;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .btn.link { border: 0; background: none; padding: 0; text-decoration: underline; color: var(--muted); font-size: .8rem; }
+  .code { font-size: 1.4rem; font-weight: 600; letter-spacing: .12em; }
+  .error { color: var(--led-err); font-size: .85rem; margin: 0; }
+
+  /* Logs */
+  .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .75rem; }
+  .chip { padding: .3rem .7rem; border-radius: 999px; border: 1px solid var(--plate-edge); background: var(--plate); cursor: pointer; font-size: .85rem; }
+  .chip[aria-pressed="false"] { opacity: .5; text-decoration: line-through; }
+  input[type="search"] {
+    flex: 1; min-width: 12rem; padding: .45rem .7rem; border-radius: .5rem;
+    border: 1px solid var(--plate-edge); background: var(--plate);
+  }
+  .log {
+    height: min(70vh, 48rem); overflow: auto; margin: 0; padding: .75rem 1rem;
+    background: var(--glass); color: #d9dedb; border-radius: .6rem; border: 1px solid var(--glass-edge);
+    font: .78rem/1.5 var(--mono); white-space: pre-wrap; word-break: break-word;
+  }
+  .log .l { display: block; }
+  .log .t { color: #7d8a86; }
+  .log .lv-warn { color: #ffcf7a; }
+  .log .lv-error { color: #ff8a7a; }
+  .log .lv-debug { color: #8fa3ad; }
+  .log .p { color: var(--vfd); }
+
+  /* Stats */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+  .panel { background: var(--plate); border: 1px solid var(--plate-edge); border-radius: .75rem; padding: 1rem 1.1rem; }
+  .panel h3 { margin: 0 0 .6rem; font-size: 1rem; font-weight: 600; }
+  dl { display: grid; grid-template-columns: fit-content(58%) minmax(0, 1fr); gap: .3rem 1rem; margin: 0; font-size: .9rem; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+  .spark { display: grid; gap: .2rem; margin-bottom: .8rem; }
+  .spark svg { width: 100%; height: 3rem; display: block; }
+  .spark .lbl { display: flex; justify-content: space-between; font-size: .85rem; }
+  .spark polyline { fill: none; stroke: var(--vfd); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .spark polygon { fill: rgba(255,181,71,.15); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+    background: var(--ink); color: var(--plate); padding: .6rem 1rem; border-radius: .5rem;
+    opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 class="brand">upnpTube<small id="appver"></small></h1>
+  <nav role="tablist" aria-label="Views">
+    <button role="tab" aria-selected="true" data-view="speakers">Speakers</button>
+    <button role="tab" aria-selected="false" data-view="logs">Logs</button>
+    <button role="tab" aria-selected="false" data-view="stats">Stats for nerds</button>
+  </nav>
+</header>
+
+<main>
+  <section id="speakers" aria-live="polite"></section>
+
+  <section id="logs" hidden>
+    <div class="toolbar">
+      <button class="chip" data-level="error" aria-pressed="true">Errors</button>
+      <button class="chip" data-level="warn" aria-pressed="true">Warnings</button>
+      <button class="chip" data-level="info" aria-pressed="true">Info</button>
+      <button class="chip" data-level="debug" aria-pressed="true">Debug</button>
+      <input type="search" id="logfilter" placeholder="Filter, e.g. Living Room or yt-dlp" aria-label="Filter log lines">
+      <button class="chip" id="follow" aria-pressed="true">Follow</button>
+      <button class="chip" id="dllog">Download</button>
+    </div>
+    <pre class="log" id="log" tabindex="0" aria-label="Log lines"></pre>
+    <p class="hint" id="loghint"></p>
+  </section>
+
+  <section id="stats" hidden></section>
+</main>
+<div id="toast" role="status"></div>
+
+<script>
+'use strict';
+const token = new URLSearchParams(location.search).get('token');
+const authHeaders = token ? { Authorization: 'Bearer ' + token } : {};
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...authHeaders, ...(opts.body ? { 'Content-Type': 'application/json', 'X-Upnptube': '1' } : {}),
+      ...(opts.method === 'POST' ? { 'X-Upnptube': '1' } : {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Request failed (HTTP ' + res.status + ')');
+  return body;
+}
+
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  return el;
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+const fmtTime = (s) => { s = Math.max(0, Math.floor(s || 0)); const m = Math.floor(s / 60);
+  return m >= 60 ? Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0')
+    : m + ':' + String(s % 60).padStart(2, '0'); };
+const fmtBytes = (b) => { if (b == null) return '–'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; } return (i ? b.toFixed(1) : b) + ' ' + u[i]; };
+const fmtDur = (s) => { const d = Math.floor(s / 86400), hh = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60;
+  return (d ? d + 'd ' : '') + (d || hh ? hh + 'h ' : '') + m + 'm'; };
+const ms = (v) => (v == null ? '–' : v + ' ms');
+
+/* ---------------------------------------------------------------- views */
+const views = { speakers: refreshSpeakers, logs: openLogs, stats: refreshStats };
+let current = 'speakers';
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
+function show(view) {
+  current = view;
+  document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
+  for (const v of Object.keys(views)) document.getElementById(v).hidden = v !== view;
+  history.replaceState(null, '', '#' + view);
+  views[view]();
+}
+
+/* ------------------------------------------------------------- speakers */
+const FORMAT_LABELS = {
+  '': 'Same as default', auto: 'Detect automatically', direct: 'Original stream',
+  mp4: 'MP4 (lossless repack)', adts: 'AAC stream (lossless repack)', flac: 'FLAC (lossless)', mp3: 'MP3',
+};
+const FORMAT_NAMES = { direct: 'original stream', mp4: 'MP4', adts: 'AAC stream', flac: 'FLAC', mp3: 'MP3' };
+let speakerData = [];
+let fetchedAt = 0;
+const pairCodes = {};
+
+async function refreshSpeakers() {
+  try {
+    const s = await api('/api/status');
+    document.getElementById('appver').textContent = 'v' + (s.app.version || '?');
+    speakerData = s.renderers; fetchedAt = performance.now();
+    renderSpeakers(s.app);
+  } catch (e) { toast(e.message); }
+}
+
+function renderSpeakers(app) {
+  const root = document.getElementById('speakers');
+  const focused = document.activeElement?.dataset?.key;
+  root.replaceChildren();
+  if (!speakerData.length) {
+    root.append(h('div', { class: 'empty' },
+      h('p', {}, 'No speakers found yet.'),
+      h('p', { class: 'hint' }, 'upnpTube looks for DLNA/UPnP renderers on startup and every few minutes. '
+        + 'If yours is missing, check that this machine is on the same network and that UDP port 1900 is not blocked.')));
+    return;
+  }
+  for (const r of speakerData) root.append(speakerRow(r, app));
+  if (focused) root.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+  tick();
+}
+
+function speakerRow(r, app) {
+  const np = r.nowPlaying;
+  const playing = r.transport === 'PLAYING';
+  const ledClass = r.lastError ? 'err' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
+  const display = h('div', { class: 'display' + (np ? '' : ' idle') },
+    np?.thumbnail ? h('img', { class: 'cover', src: np.thumbnail, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' })
+      : h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
+    h('div', {},
+      h('p', { class: 'title' }, np ? np.title : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
+      h('p', { class: 'artist' }, np ? np.artist : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app')),
+      np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
+        'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
+      Array.from({ length: 40 }, () => h('i'))), h('span', { class: 'time', 'data-time': r.id })) : null,
+      r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null));
+
+  const sel = h('select', { 'data-key': 'fmt-' + r.id, onchange: async (e) => {
+    const v = e.target.value; e.target.disabled = true;
+    try {
+      await api('/api/renderers/' + encodeURIComponent(r.id) + '/format', { method: 'POST', body: JSON.stringify({ format: v || null }) });
+      toast(r.friendlyName + ': ' + (v ? FORMAT_LABELS[v] : 'same as default') + (np ? ', reloading current track' : ''));
+    } catch (err) { toast(err.message); }
+    refreshSpeakers();
+  } });
+  for (const [v, label] of Object.entries(FORMAT_LABELS)) {
+    sel.append(h('option', { value: v, selected: (r.format.override ?? '') === v },
+      v === '' ? label + ': ' + (FORMAT_LABELS[app.outputFormat] || app.outputFormat) : label));
+  }
+
+  const fmtHint = [];
+  if (r.format.current) fmtHint.push('Playing as ' + FORMAT_NAMES[r.format.current] + '.');
+  if (r.format.mode === 'auto') fmtHint.push(r.format.learned ? 'Detected: ' + FORMAT_NAMES[r.format.learned] + '.' : 'Not detected yet.');
+
+  const code = pairCodes[r.id];
+  return h('article', { class: 'speaker', 'aria-label': r.name },
+    display,
+    h('div', { class: 'controls' },
+      h('h2', { class: 'name' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), r.friendlyName || r.name),
+      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address),
+      r.senders.length ? h('p', { class: 'senders' }, 'Connected: ' + r.senders.join(', ')) : null,
+      h('label', { class: 'field' }, 'Stream format', sel),
+      fmtHint.length || r.format.learned ? h('p', { class: 'hint' }, fmtHint.join(' '), ' ',
+        r.format.learned ? h('button', { class: 'btn link', 'data-key': 'forget-' + r.id, onclick: async () => {
+          try { await api('/api/renderers/' + encodeURIComponent(r.id) + '/forget-format', { method: 'POST' });
+            toast('Forgot the detected format for ' + r.friendlyName); } catch (err) { toast(err.message); }
+          refreshSpeakers(); } }, 'Detect again') : null) : null,
+      r.lastError ? h('p', { class: 'error' }, r.lastError) : null,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', 'data-key': 'pair-' + r.id, onclick: async (e) => {
+          e.target.disabled = true; e.target.textContent = 'Getting code…';
+          try { pairCodes[r.id] = (await api('/api/renderers/' + encodeURIComponent(r.id) + '/pair', { method: 'POST' })).code; }
+          catch (err) { toast(err.message); }
+          refreshSpeakers();
+        } }, code ? 'New TV code' : 'Get TV code'),
+        code ? h('span', { class: 'code', 'aria-label': 'TV code' }, code.replace(/(\d{3})(?=\d)/g, '$1 ')) : null),
+      code ? h('p', { class: 'hint' }, 'In the YouTube app: Settings, Watch on TV, Enter TV code.') : null));
+}
+
+// Move progress meters smoothly between refreshes.
+function tick() {
+  const dt = (performance.now() - fetchedAt) / 1000;
+  for (const r of speakerData) {
+    const p = r.position; if (!p) continue;
+    const rel = Math.min(p.dur || Infinity, p.rel + (p.playing ? dt : 0));
+    const meter = document.querySelector(`[data-meter="${CSS.escape(r.id)}"]`);
+    const time = document.querySelector(`[data-time="${CSS.escape(r.id)}"]`);
+    if (!meter) continue;
+    const lit = p.dur ? Math.round((rel / p.dur) * 40) : 0;
+    meter.querySelectorAll('i').forEach((i, n) => i.classList.toggle('on', n < lit));
+    meter.setAttribute('aria-valuenow', Math.round(rel));
+    time.textContent = fmtTime(rel) + ' / ' + (p.dur ? fmtTime(p.dur) : '–');
+  }
+}
+setInterval(() => { if (current === 'speakers' && !document.hidden) tick(); }, 1000);
+setInterval(() => { if (current === 'speakers' && !document.hidden && !document.activeElement?.matches('select')) refreshSpeakers(); }, 4000);
+
+/* ----------------------------------------------------------------- logs */
+const logEl = document.getElementById('log');
+const levels = { error: true, warn: true, info: true, debug: true };
+const lines = [];
+let es = null;
+let follow = true;
+
+function lineVisible(l) {
+  const q = document.getElementById('logfilter').value.trim().toLowerCase();
+  return levels[l.level] && (!q || (l.prefix + ' ' + l.text).toLowerCase().includes(q));
+}
+function lineEl(l) {
+  const t = new Date(l.ts);
+  return h('span', { class: 'l lv-' + l.level },
+    h('span', { class: 't' }, t.toLocaleTimeString([], { hour12: false }) + '.' + String(t.getMilliseconds()).padStart(3, '0') + ' '),
+    l.level === 'info' ? '' : l.level.toUpperCase() + ' ',
+    h('span', { class: 'p' }, l.prefix.replace('[upnpTube] ', '').replace('[upnpTube]', '')), ' ', l.text);
+}
+function redrawLogs() {
+  logEl.replaceChildren(...lines.filter(lineVisible).map(lineEl));
+  if (follow) logEl.scrollTop = logEl.scrollHeight;
+  updateLogHint();
+}
+function updateLogHint() {
+  document.getElementById('loghint').textContent = lines.length
+    ? 'The last ' + lines.length + ' lines are kept in memory. Debug lines appear only with LOG_LEVEL=debug.'
+    : 'Waiting for log lines…';
+}
+function openLogs() {
+  if (es) return redrawLogs();
+  const after = lines.length ? lines[lines.length - 1].id : 0;
+  es = new EventSource('/api/logs/stream?after=' + after + (token ? '&token=' + encodeURIComponent(token) : ''));
+  let pending = false;
+  es.onmessage = (ev) => {
+    const l = JSON.parse(ev.data);
+    lines.push(l); if (lines.length > 2000) lines.shift();
+    if (lines.length === 1 || lines.length % 100 === 0) updateLogHint();
+    if (current !== 'logs' || !lineVisible(l)) return;
+    logEl.append(lineEl(l));
+    if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; if (follow) logEl.scrollTop = logEl.scrollHeight; }); }
+  };
+  es.onerror = () => { document.getElementById('loghint').textContent = 'Live log disconnected. Reconnecting…'; };
+  es.onopen = updateLogHint;
+  redrawLogs();
+}
+document.querySelectorAll('[data-level]').forEach((b) => b.addEventListener('click', () => {
+  levels[b.dataset.level] = !levels[b.dataset.level]; b.setAttribute('aria-pressed', String(levels[b.dataset.level])); redrawLogs();
+}));
+document.getElementById('logfilter').addEventListener('input', redrawLogs);
+document.getElementById('follow').addEventListener('click', (e) => {
+  follow = !follow; e.target.setAttribute('aria-pressed', String(follow)); if (follow) logEl.scrollTop = logEl.scrollHeight;
+});
+logEl.addEventListener('wheel', () => { if (logEl.scrollTop + logEl.clientHeight < logEl.scrollHeight - 40 && follow) {
+  follow = false; document.getElementById('follow').setAttribute('aria-pressed', 'false'); } }, { passive: true });
+document.getElementById('dllog').addEventListener('click', () => {
+  const text = lines.filter(lineVisible).map((l) => new Date(l.ts).toISOString() + ' ' + l.level.toUpperCase().padEnd(5) + ' ' + l.prefix + ' ' + l.text).join('\n');
+  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: 'upnptube-' + new Date().toISOString().slice(0, 19).replace(/:/g, '') + '.log' });
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+/* ---------------------------------------------------------------- stats */
+function spark(label, values, fmt) {
+  const max = Math.max(1, ...values); const n = values.length;
+  const pts = values.map((v, i) => ((i / Math.max(1, n - 1)) * 100).toFixed(1) + ',' + (30 - (v / max) * 28).toFixed(1)).join(' ');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 100 30'); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('aria-hidden', 'true');
+  if (n > 1) {
+    const poly = document.createElementNS(svg.namespaceURI, 'polygon'); poly.setAttribute('points', '0,30 ' + pts + ' 100,30');
+    const line = document.createElementNS(svg.namespaceURI, 'polyline'); line.setAttribute('points', pts);
+    svg.append(poly, line);
+  }
+  return h('div', { class: 'spark' }, h('div', { class: 'lbl' }, h('span', { class: 'muted' }, label),
+    h('span', {}, n ? fmt(values[n - 1]) : '–')), svg);
+}
+const dl = (pairs) => h('dl', {}, pairs.filter(Boolean).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v ?? '–')]));
+const panel = (title, ...kids) => h('div', { class: 'panel' }, h('h3', {}, title), ...kids);
+
+async function refreshStats() {
+  try {
+    const [s, st] = await Promise.all([api('/api/stats'), api('/api/status')]);
+    document.getElementById('appver').textContent = 'v' + (st.app.version || '?');
+    const c = s.counters, g = s.gauges, t = s.timers, hist = s.history;
+    const res = t.resolve || {}, dlT = t.download || {}, soap = t.soap || {};
+    const hits = c['resolve.cacheHits'] || 0, lookups = res.count || 0;
+    const root = document.getElementById('stats');
+    root.replaceChildren(
+      h('div', { class: 'grid' },
+        panel('This box',
+          spark('CPU (% of one core)', hist.map((x) => x.cpu), (v) => v + ' %'),
+          spark('Memory (RSS)', hist.map((x) => x.rss), fmtBytes),
+          dl([['Uptime', fmtDur(s.uptimeS)], ['upnpTube', 'v' + s.info.version], ['Node.js', s.info.node],
+            ['yt-dlp', s.info.ytdlp || 'not found'], ['ffmpeg', s.info.ffmpeg || 'not found'],
+            ['Host', s.info.host], ['System', s.info.platform], ['CPU', s.info.cpus],
+            ['Load (1/5/15 min)', s.info.loadavg.join(' / ')], ['Heap used', fmtBytes(s.memory.heapUsed)]])),
+        panel('Streaming',
+          spark('Throughput', hist.map((x) => x.kbps), (v) => (v >= 1000 ? (v / 1000).toFixed(1) + ' Mbit/s' : v + ' kbit/s')),
+          dl([['Streams open now', g['http.active'] || 0], ['ffmpeg processes now', g['ffmpeg.active'] || 0],
+            ['Requests served', c['http.requests'] || 0], ['Data served', fmtBytes(c['http.bytes'] || 0)],
+            ...['direct', 'mp4', 'adts', 'flac', 'mp3'].filter((f) => c['http.requests.' + f]).map((f) => ['Requests as ' + f, c['http.requests.' + f]])])),
+        panel('YouTube lookups',
+          dl([['Lookups (yt-dlp)', lookups], ['Served from cache', hits + (lookups + hits ? ' (' + Math.round((hits / (lookups + hits)) * 100) + ' %)' : '')],
+            ['Failed', c['resolve.failed'] || 0], ['Average time', ms(res.avg)], ['Median / 95th percentile', ms(res.p50) + ' / ' + ms(res.p95)],
+            ['Slowest', ms(res.max)]])),
+        panel('Downloads and cache',
+          dl([['Downloads', dlT.count || 0], ['Downloaded', fmtBytes(c['download.bytes'] || 0)], ['Average download', ms(dlT.avg)],
+            ['Refused by YouTube (403)', c['download.forbidden'] || 0], ['Retries', c['download.retries'] || 0], ['Gave up', c['download.failed'] || 0],
+            ['MP4 builds (avg)', t['build.mp4'] ? t['build.mp4'].count + ' (' + ms(t['build.mp4'].avg) + ')' : '–'],
+            ['FLAC builds (avg)', t['build.flac'] ? t['build.flac'].count + ' (' + ms(t['build.flac'].avg) + ')' : '–'],
+            ['Cache reuse', (c['cache.hits'] || 0) + ' of ' + ((c['cache.hits'] || 0) + (c['cache.misses'] || 0))],
+            ['Cache size', fmtBytes(s.cache.bytes) + ' of ' + fmtBytes(s.cache.limitBytes) + ' (' + s.cache.files + ' files)']])),
+        panel('UPnP control',
+          dl([['SOAP calls', c['soap.calls'] || 0], ['Errors', c['soap.errors'] || 0], ['Average round trip', ms(soap.avg)],
+            ['95th percentile', ms(soap.p95)], ['Default format', st.app.outputFormat], ['Prepare next track', st.app.prefetch ? 'on' : 'off'],
+            ['Gapless', st.app.gapless ? 'on' : 'off']])),
+      ),
+      h('h2', {}, 'Per speaker'),
+      h('div', { class: 'grid' }, st.renderers.map((r) => panel(r.friendlyName || r.name,
+        dl([['Address', r.address + ' (we answer on ' + r.advertisedIp + ')'], ['DIAL port', r.dialPort], ['Cast receiver', r.receiver],
+          ['Player / renderer state', (r.playerStatus || '–') + ' / ' + (r.transport || '–')],
+          ['Format setting', r.format.override ?? 'default (' + r.format.global + ')'], ['Detected format', r.format.learned || '–'],
+          ['Gapless support', r.gapless == null ? 'not tested yet' : r.gapless ? 'yes' : 'no'],
+          ['SOAP calls / errors', r.soap.calls + ' / ' + r.soap.errors], ['Average round trip', ms(r.soap.avgMs)],
+          ['Status polls', r.polls], ['Last SSDP announcement', r.lastSeenS + ' s ago'],
+          ['Accepts', r.sink.length ? r.sink.join(', ') : 'not reported']])))));
+  } catch (e) { toast(e.message); }
+}
+setInterval(() => { if (current === 'stats' && !document.hidden) refreshStats(); }, 5000);
+
+window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (views[v] && v !== current) show(v); });
+show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'speakers');
+</script>
+</body>
+</html>

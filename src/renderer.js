@@ -18,6 +18,11 @@ export class Renderer extends Player {
   #ip = null;
   #store = null;
   #learnedFormat = null;   // format that worked on this renderer (persisted)
+  #formatOverride = null;  // per-renderer setting from the status page (persisted)
+  #transport = null;       // last polled transport state
+  #position = null;        // { rel, dur, at } from the last poll
+  #soap = { calls: 0, errors: 0, totalMs: 0 };
+  #polls = 0;
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -98,10 +103,19 @@ export class Renderer extends Player {
       .trim();
     this.log = this.baseLog.child(`[${desc.friendlyName}]`);
 
-    this.#call = (svc, action, params) => {
+    this.#call = async (svc, action, params) => {
       const service = desc.services[`urn:upnp-org:serviceId:${svc}`];
-      if (!service) return Promise.reject(new UpnpError(`${svc} service not provided`, { code: 'ENOSERVICE' }));
-      return callAction(service, action, params);
+      if (!service) throw new UpnpError(`${svc} service not provided`, { code: 'ENOSERVICE' });
+      const t = Date.now();
+      this.#soap.calls++;
+      try {
+        return await callAction(service, action, params);
+      } catch (err) {
+        this.#soap.errors++;
+        throw err;
+      } finally {
+        this.#soap.totalMs += Date.now() - t;
+      }
     };
 
     try {
@@ -119,6 +133,11 @@ export class Renderer extends Player {
     if (FORMATS[learned]) {
       this.#learnedFormat = learned;
       this.log.info(`Using previously detected stream format "${learned}"`);
+    }
+    const override = await this.#store.get('upnptube.formatOverride');
+    if (override === 'auto' || FORMATS[override]) {
+      this.#formatOverride = override;
+      this.log.info(`Stream format set to "${override}" for this renderer`);
     }
 
     this.#receiver = this.createReceiver(this, {
@@ -263,8 +282,9 @@ export class Renderer extends Player {
     this.#current = item.current;
     this.nowPlaying = {
       videoId: item.current.video.id, title: item.info.title, artist: item.info.artist,
-      duration: item.info.duration, format: item.format,
+      duration: item.info.duration, format: item.format, thumbnail: item.info.thumbnail,
     };
+    this.#position = { rel: item.current.startAt, dur: item.info.duration, at: Date.now() };
     this.lastError = null;
     this.#sawPlaying = alreadyPlaying;
     this.#expectStop = false;
@@ -338,8 +358,7 @@ export class Renderer extends Player {
   async #rendererAdvanced() {
     const q = this.#queued;
     if (!q?.sentToRenderer) return false;
-    const pos = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
-    let uri = pos?.TrackURI;
+    let uri = this.#position?.uri;
     if (!uri) uri = (await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 }))?.CurrentURI;
     // Compare by our stream path: renderers sometimes rewrite host or escaping.
     return Boolean(uri && uri.includes(q.item.streamPath));
@@ -349,7 +368,7 @@ export class Renderer extends Player {
   async #handleStartFailure() {
     const c = this.#current;
     const why = c.fetched ? 'fetched the stream but never started playing' : 'never requested the stream';
-    const next = this.cfg.outputFormat === 'auto' ? this.#nextFormat(c.format) : null;
+    const next = this.formatMode === 'auto' ? this.#nextFormat(c.format) : null;
     // Not even fetching usually means a network problem, not a format problem - but
     // some renderers reject unsupported types without fetching, so still try the next one.
     if (next) {
@@ -368,7 +387,7 @@ export class Renderer extends Player {
   /** Called once the renderer reaches PLAYING: remember what worked. */
   async #confirmFormat() {
     const f = this.#current?.format;
-    if (!f || this.cfg.outputFormat !== 'auto' || this.#learnedFormat === f) return;
+    if (!f || this.formatMode !== 'auto' || this.#learnedFormat === f) return;
     this.#learnedFormat = f;
     await this.#store?.set('upnptube.format', f);
     this.log.info(`Stream format "${f}" works on this renderer - remembered`);
@@ -384,6 +403,8 @@ export class Renderer extends Player {
 
   async doStop() {
     this.#loadSeq++; // cancel any pending load
+    this.#position = null;
+    this.#transport = 'STOPPED';
     this.#current = null;
     this.#queued = null;
     this.#advanced = null;
@@ -444,8 +465,70 @@ export class Renderer extends Player {
 
   // ------------------------------------------------------------------ internals
 
+  /** Effective format setting: this renderer's override, else the global OUTPUT_FORMAT. */
+  get formatMode() {
+    return this.#formatOverride ?? this.cfg.outputFormat;
+  }
+
+  /**
+   * Set this renderer's format ('auto', a format name, or null to follow OUTPUT_FORMAT).
+   * Applies immediately: a playing track is reloaded at its current position.
+   */
+  async setFormatOverride(value) {
+    if (value !== null && value !== 'auto' && !FORMATS[value]) throw new Error(`Unknown format "${value}"`);
+    this.#formatOverride = value;
+    await this.#store?.set('upnptube.formatOverride', value);
+    this.log.info(value ? `Stream format set to "${value}" for this renderer` : 'Stream format follows the global setting again');
+    this.#queued = null; // prepared next track may be in the old format
+    const c = this.#current;
+    if (c && this.status === PLAYER_STATUSES.PLAYING) {
+      const pos = await this.doGetPosition();
+      await this.#load(c.video, pos);
+    }
+  }
+
+  async forgetLearnedFormat() {
+    this.#learnedFormat = null;
+    await this.#store?.set('upnptube.format', null);
+    this.log.info('Forgot the detected stream format - it will be detected again on the next track');
+  }
+
+  /** Everything the status page shows about this renderer. */
+  statusInfo() {
+    const p = this.#position;
+    const playing = this.#transport === 'PLAYING';
+    return {
+      id: this.udn,
+      name: this.name,
+      friendlyName: this.description?.friendlyName ?? null,
+      manufacturer: this.description?.manufacturer ?? '',
+      model: [this.description?.modelName, this.description?.modelNumber].filter(Boolean).join(' '),
+      address: this.address,
+      advertisedIp: this.#ip,
+      dialPort: this.port,
+      receiver: this.receiverStatus,
+      senders: this.connectedSenders.map((s) => s.user?.name ?? s.name),
+      playerStatus: this.status,
+      transport: this.#transport,
+      nowPlaying: this.nowPlaying,
+      // Position extrapolated from the last poll so the page's progress bar moves smoothly.
+      position: p ? { rel: p.rel + (playing ? (Date.now() - p.at) / 1000 : 0), dur: p.dur, playing } : null,
+      upNext: this.upNext,
+      lastError: this.lastError,
+      format: {
+        mode: this.formatMode, override: this.#formatOverride, global: this.cfg.outputFormat,
+        learned: this.#learnedFormat, current: this.#current?.format ?? null,
+      },
+      gapless: this.#gaplessSupported,
+      sink: (this.#protocols ?? []).map((x) => x.contentFormat).filter(Boolean),
+      soap: { ...this.#soap, avgMs: this.#soap.calls ? Math.round(this.#soap.totalMs / this.#soap.calls) : null },
+      polls: this.#polls,
+      lastSeenS: Math.round((Date.now() - this.lastSeen) / 1000),
+    };
+  }
+
   #chooseFormat(sourceMime) {
-    if (this.cfg.outputFormat !== 'auto') return this.cfg.outputFormat;
+    if (this.formatMode !== 'auto') return this.formatMode;
     if (this.#learnedFormat) return this.#learnedFormat;
     // First format in the chain the renderer claims to support (unknown list = try it).
     return FALLBACK_CHAIN.find((f) => f === 'mp3'
@@ -510,8 +593,25 @@ export class Renderer extends Player {
 
   async #poll() {
     if (this.#expectStop) return;
+    this.#polls++;
     const state = await this.#transportState();
     if (!state) return;
+    this.#transport = state;
+    if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
+      const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+      if (r) {
+        let uri = r.TrackURI;
+        if (!uri && this.#queued?.sentToRenderer) {
+          uri = (await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 }))?.CurrentURI;
+        }
+        const startAt = this.#current?.startAt ?? 0;
+        this.#position = {
+          rel: parseHms(r.RelTime) + startAt,
+          dur: this.nowPlaying?.duration || parseHms(r.TrackDuration),
+          uri, at: Date.now(),
+        };
+      }
+    }
 
     // If the renderer hasn't reached PLAYING well after Play, assume it can't handle
     // the stream (typically YouTube's fragmented DASH M4A) and retry as MP3.

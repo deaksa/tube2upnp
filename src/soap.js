@@ -5,6 +5,7 @@
 //    non-ASCII metadata (accented titles!) truncates the request body.
 
 import et from 'elementtree';
+import { stats } from './stats.js';
 
 const esc = (s) => String(s ?? '').replace(/[<>&"']/g, (c) => ({
   '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;',
@@ -72,6 +73,8 @@ export async function callAction(service, action, params = {}, timeoutMs = 8000)
   const buf = Buffer.from(body, 'utf8');
 
   let res;
+  const started = Date.now();
+  stats.inc('soap.calls');
   try {
     res = await fetch(service.controlURL, {
       method: 'POST',
@@ -84,11 +87,14 @@ export async function callAction(service, action, params = {}, timeoutMs = 8000)
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
+    stats.inc('soap.errors');
     throw new UpnpError(`${action}: ${err.name === 'TimeoutError' ? 'timed out' : err.message}`, { code: 'ENETWORK' });
   }
 
   const text = await res.text();
+  stats.time('soap', Date.now() - started);
   if (!res.ok) {
+    stats.inc('soap.errors');
     const { code, desc } = parseFault(text);
     const name = desc || ERROR_NAMES[code] || `HTTP ${res.status}`;
     throw new UpnpError(`${action}: ${name}${code ? ` (${code})` : ''}`, {

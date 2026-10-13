@@ -3,6 +3,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { writeFile, rm } from 'node:fs/promises';
+import { stats } from './stats.js';
 
 const execFileP = promisify(execFile);
 
@@ -50,7 +51,10 @@ export class Resolver {
     if (!VIDEO_ID.test(videoId)) throw new Error(`Refusing invalid video ID "${videoId}"`);
 
     const hit = this.#cache.get(videoId);
-    if (hit && hit.expires > Date.now()) return hit.info;
+    if (hit && hit.expires > Date.now()) {
+      stats.inc('resolve.cacheHits');
+      return hit.info;
+    }
 
     // Coalesce concurrent lookups for the same video (e.g. renderer retrying).
     if (this.#inflight.has(videoId)) return this.#inflight.get(videoId);
@@ -82,9 +86,11 @@ export class Resolver {
         maxBuffer: 32 * 1024 * 1024,
       }));
     } catch (err) {
+      stats.inc('resolve.failed');
       const detail = (err.stderr || err.message || '').toString().trim().split('\n').slice(-3).join(' | ');
       throw new Error(`yt-dlp failed for ${videoId}: ${detail}`);
     }
+    stats.time('resolve', Date.now() - started);
 
     const j = JSON.parse(stdout);
     // With a single selected format, url/ext live at top level; with merged formats they don't.
@@ -124,6 +130,7 @@ export function scheduleYtdlpUpdates(config, logger) {
     try {
       const { stdout } = await execFileP(cmd, args, { timeout: 5 * 60 * 1000 });
       logger.info('yt-dlp update:', stdout.trim().split('\n').pop());
+      stats.info.ytdlp = await ytdlpVersion(config);
     } catch (err) {
       logger.warn('yt-dlp update failed:', (err.stderr || err.message).toString().trim().split('\n').pop());
     }
@@ -163,5 +170,14 @@ export async function downloadWithYtdlp(config, _logger, videoId, info, dest) {
     throw e;
   } finally {
     await rm(jsonFile, { force: true });
+  }
+}
+
+export async function ytdlpVersion(config) {
+  try {
+    const { stdout } = await execFileP(config.ytdlpPath, ['--version'], { timeout: 15000 });
+    return stdout.trim();
+  } catch {
+    return null;
   }
 }

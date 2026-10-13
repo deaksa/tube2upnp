@@ -24,6 +24,7 @@ services:
       RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
       RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app
       STATUS_PORT: ${STATUS_PORT:-8080}       # 0 disables the status page
+      STATUS_TOKEN: ${STATUS_TOKEN:-}         # optional: require ?token=… on the status page
       MEDIA_PORT: ${MEDIA_PORT:-8000}
       RECEIVER_BASE_PORT: ${RECEIVER_BASE_PORT:-3000}
 

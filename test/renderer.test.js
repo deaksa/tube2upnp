@@ -269,3 +269,25 @@ test('queue change replaces the prepared next track', async (t) => {
   assert.equal(fake.state.nextUri, '');
   await r.destroy();
 });
+
+test('per-renderer format override wins over the global setting and is persisted', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-'));
+  const { r, registered } = setup(fake, { outputFormat: 'mp4' }, dataDir);
+  await r.init();
+  await r.setFormatOverride('flac');
+  await r.doPlay({ id: A }, 0);
+  assert.equal(registered.at(-1).format, 'flac');
+  assert.equal(r.statusInfo().format.mode, 'flac');
+  await assert.rejects(r.setFormatOverride('ogg'), /Unknown format/);
+  await r.destroy();
+
+  const again = setup(fake, { outputFormat: 'mp4' }, dataDir);
+  await again.r.init();
+  assert.equal(again.r.statusInfo().format.override, 'flac', 'override survives restart');
+  await again.r.setFormatOverride(null);
+  await again.r.doPlay({ id: A }, 0);
+  assert.equal(again.registered.at(-1).format, 'mp4', 'back to the global setting');
+  await again.r.destroy();
+});

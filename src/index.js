@@ -4,7 +4,9 @@ import { promisify } from 'node:util';
 import { config } from './config.js';
 import { Logger } from './logger.js';
 import { Ssdp, udnFromUsn, maxAge } from './ssdp.js';
-import { Resolver, scheduleYtdlpUpdates } from './resolver.js';
+import { Resolver, scheduleYtdlpUpdates, ytdlpVersion } from './resolver.js';
+import { stats } from './stats.js';
+import { readFileSync } from 'node:fs';
 import { MediaServer } from './mediaServer.js';
 import { Renderer } from './renderer.js';
 import { startStatusServer } from './statusServer.js';
@@ -104,13 +106,20 @@ function prune() {
   }
 }
 
-async function checkYtdlp() {
-  try {
-    const { stdout } = await promisify(execFile)(config.ytdlpPath, ['--version'], { timeout: 15000 });
-    log.info(`yt-dlp ${stdout.trim()}`);
-  } catch (err) {
-    log.error(`yt-dlp not found or not runnable at "${config.ytdlpPath}": ${err.message}`);
+async function checkTools() {
+  stats.info.version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version;
+  stats.info.ytdlp = await ytdlpVersion(config);
+  if (stats.info.ytdlp) log.info(`yt-dlp ${stats.info.ytdlp}`);
+  else {
+    log.error(`yt-dlp not found or not runnable at "${config.ytdlpPath}"`);
     log.error('Install it (pip install -U "yt-dlp[default]") or set YTDLP_PATH.');
+  }
+  try {
+    const { stdout } = await promisify(execFile)(config.ffmpegPath, ['-version'], { timeout: 15000 });
+    stats.info.ffmpeg = /ffmpeg version (\S+)/.exec(stdout)?.[1] ?? 'unknown';
+  } catch {
+    stats.info.ffmpeg = null;
+    log.warn('ffmpeg not found - only OUTPUT_FORMAT=direct will work');
   }
 }
 
@@ -127,10 +136,11 @@ async function shutdown(sig) {
 
 async function main() {
   log.info('Starting upnpTube');
-  await checkYtdlp();
+  await checkTools();
+  stats.startSampling();
   scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
   await mediaServer.start();
-  if (config.statusPort) startStatusServer(config, renderers, log.child('[status]'));
+  if (config.statusPort) startStatusServer(config, { renderers, mediaServer }, log.child('[status]'));
 
   ssdp.on('alive', (h, rinfo) => onAlive(h, rinfo).catch((e) => log.error('alive handler:', e)));
   ssdp.on('byebye', onByebye);

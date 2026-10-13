@@ -1,85 +1,130 @@
-// Tiny LAN status page: lists renderers, what they play, and hands out
-// "Link with TV code" pairing codes. Pairing works even when the phone can't
-// see our DIAL/SSDP announcements (other VLAN, guest Wi-Fi, mDNS-filtering APs).
+// LAN status page: renderers, per-renderer stream format, live logs, stats for nerds,
+// and "Link with TV code" pairing codes (which work even when the phone can't see our
+// DIAL/SSDP announcements: other VLAN, guest Wi-Fi, multicast-filtering APs).
 
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
+import { recentLogs, onLog } from './logger.js';
+import { stats } from './stats.js';
 
-const esc = (s) => String(s ?? '').replace(/[<>&"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const PAGE = readFileSync(new URL('./ui/index.html', import.meta.url));
 
-function snapshot(renderers) {
-  return [...renderers.values()].map((r) => ({
-    id: r.udn,
-    name: r.name,
-    device: r.description ? `${r.description.manufacturer} ${r.description.modelName}`.trim() : '',
-    address: r.address,
-    port: r.port,
-    receiver: r.receiverStatus,
-    senders: r.connectedSenders.map((s) => s.user?.name ?? s.name),
-    nowPlaying: r.nowPlaying,
-    upNext: r.upNext,
-    lastError: r.lastError,
-  }));
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'DENY',
+};
+const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+  + "img-src 'self' https: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+function json(res, code, body) {
+  res.writeHead(code, { ...SECURITY_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
 }
 
-function page(list) {
-  const rows = list.map((r) => `
-    <tr>
-      <td><b>${esc(r.name)}</b><br><small>${esc(r.device)} · ${esc(r.address)}</small></td>
-      <td>${esc(r.receiver)}${r.senders.length ? `<br><small>${esc(r.senders.join(', '))}</small>` : ''}</td>
-      <td>${r.nowPlaying ? `${esc(r.nowPlaying.title)}<br><small>${esc(r.nowPlaying.artist)} · ${esc(r.nowPlaying.format)}</small>` : '–'}
-          ${r.upNext ? `<br><small>Next: ${esc(r.upNext.title)}${r.upNext.gapless ? ' (gapless)' : ''}</small>` : ''}
-          ${r.lastError ? `<br><small class="err">${esc(r.lastError)}</small>` : ''}</td>
-      <td><button data-id="${esc(r.id)}">TV code</button><span class="code"></span></td>
-    </tr>`).join('');
-  return `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>upnpTube</title>
-<style>
-  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-  body { margin: 1.5rem; max-width: 60rem; }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { padding: .5rem; border-bottom: 1px solid #8884; text-align: left; vertical-align: top; }
-  small { opacity: .7 } .err { color: #d33; opacity: 1 }
-  .code { font: 600 1.2rem ui-monospace, monospace; margin-left: .5rem; letter-spacing: .1em; }
-</style></head><body>
-<h1>upnpTube</h1>
-<p>${list.length} renderer(s). In the YouTube app: <i>Settings → Watch on TV → Link with TV code</i> if a speaker doesn't show up in the cast menu.</p>
-<table><tr><th>Renderer</th><th>Receiver</th><th>Now playing</th><th>Pairing</th></tr>${rows}</table>
-<script>
-document.querySelectorAll('button[data-id]').forEach(b => b.onclick = async () => {
-  const out = b.nextElementSibling; out.textContent = '…';
-  const r = await fetch('/api/renderers/' + encodeURIComponent(b.dataset.id) + '/pair', { method: 'POST' });
-  const j = await r.json();
-  out.textContent = j.code ? j.code.replace(/(\\d{3})(?=\\d)/g, '$1 ') : (j.error || 'failed');
-});
-</script></body></html>`;
+async function readJson(req, limit = 4096) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > limit) throw Object.assign(new Error('Request body too large'), { status: 413 });
+  }
+  try { return body ? JSON.parse(body) : {}; } catch { throw Object.assign(new Error('Invalid JSON'), { status: 400 }); }
 }
 
-export function startStatusServer(config, renderers, log) {
+function tokenOk(config, req, url) {
+  if (!config.statusToken) return true;
+  const given = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '') || url.searchParams.get('token') || '';
+  const a = Buffer.from(given);
+  const b = Buffer.from(config.statusToken);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Changes need a custom header (a cross-site page can't send one without a CORS
+ * preflight, which we never approve) and, if the browser sends Origin, our own host.
+ */
+function csrfOk(req) {
+  if (req.headers['x-upnptube'] !== '1') return false;
+  const origin = req.headers.origin;
+  return !origin || origin === `http://${req.headers.host}`;
+}
+
+export function startStatusServer(config, { renderers, mediaServer }, log) {
+  const routes = [
+    ['GET', /^\/api\/status$/, async () => ({
+      app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
+        outputFormat: config.outputFormat, prefetch: config.prefetch, gapless: config.gapless },
+      renderers: [...renderers.values()].map((r) => r.statusInfo()),
+    })],
+    ['GET', /^\/api\/stats$/, async () => ({ ...stats.snapshot(), cache: await mediaServer.cacheInfo() })],
+    ['GET', /^\/api\/logs$/, async (_m, url) => ({ lines: recentLogs(Number(url.searchParams.get('after')) || 0) })],
+    ['POST', /^\/api\/renderers\/([^/]+)\/format$/, async (m, _url, req) => {
+      const { format } = await readJson(req);
+      await renderer(m[1]).setFormatOverride(format ?? null);
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/forget-format$/, async (m) => {
+      await renderer(m[1]).forgetLearnedFormat();
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/pair$/, async (m) => ({ code: await renderer(m[1]).getPairingCode() })],
+  ];
+
+  function renderer(id) {
+    const r = renderers.get(decodeURIComponent(id));
+    if (!r) throw Object.assign(new Error('Unknown renderer - it may have gone offline'), { status: 404 });
+    return r;
+  }
+
   const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x');
     try {
-      const url = new URL(req.url, 'http://x');
-      if (req.method === 'GET' && url.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(page(snapshot(renderers)));
-      } else if (req.method === 'GET' && url.pathname === '/api/renderers') {
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(snapshot(renderers)));
-      } else if (req.method === 'GET' && url.pathname === '/healthz') {
-        res.writeHead(200).end('ok');
-      } else if (req.method === 'POST' && /^\/api\/renderers\/[^/]+\/pair$/.test(url.pathname)) {
-        const id = decodeURIComponent(url.pathname.split('/')[3]);
-        const r = renderers.get(id);
-        if (!r) return res.writeHead(404, { 'Content-Type': 'application/json' }).end('{"error":"unknown renderer"}');
-        const code = await r.getPairingCode();
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ code }));
-      } else {
-        res.writeHead(404).end();
+      if (req.method === 'GET' && url.pathname === '/healthz') {
+        res.writeHead(200, SECURITY_HEADERS).end('ok');
+        return;
       }
+      if (req.method === 'GET' && url.pathname === '/') {
+        // The page itself is harmless; with STATUS_TOKEN set, its API calls carry the token.
+        res.writeHead(200, {
+          ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': PAGE_CSP, 'Cache-Control': 'no-store',
+        }).end(PAGE);
+        return;
+      }
+      if (!tokenOk(config, req, url)) return json(res, 401, { error: 'Missing or wrong token. Open the page as /?token=…' });
+
+      if (req.method === 'GET' && url.pathname === '/api/logs/stream') return streamLogs(req, res, url);
+
+      for (const [method, re, handler] of routes) {
+        const m = re.exec(url.pathname);
+        if (!m || req.method !== method) continue;
+        if (method === 'POST' && !csrfOk(req)) return json(res, 403, { error: 'Cross-site request refused' });
+        return json(res, 200, await handler(m, url, req));
+      }
+      json(res, 404, { error: 'Not found' });
     } catch (err) {
-      log.warn('Status request failed:', err.message);
-      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+      if (!err.status) log.warn(`${req.method} ${url.pathname} failed:`, err.message);
+      if (!res.headersSent) json(res, err.status ?? 500, { error: err.message });
     }
   });
+
+  // Server-sent events: live log lines.
+  function streamLogs(req, res, url) {
+    res.writeHead(200, {
+      ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive',
+    });
+    const send = (line) => res.write(`id: ${line.id}\ndata: ${JSON.stringify(line)}\n\n`);
+    const after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after')) || 0;
+    for (const line of recentLogs(after)) send(line);
+    const off = onLog(send);
+    const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+    req.on('close', () => { off(); clearInterval(ping); });
+  }
+
   server.on('error', (err) => log.error(`Status page on :${config.statusPort} failed:`, err.message));
-  server.listen(config.statusPort, () => log.info(`Status page on http://<this-host>:${config.statusPort}/`));
+  server.listen(config.statusPort, config.statusBind || undefined, () => {
+    log.info(`Status page on http://<this-host>:${server.address().port}/${config.statusToken ? '?token=…' : ''}`);
+  });
   return server;
 }

@@ -60,6 +60,24 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 - a Linux machine, Raspberry Pi or NAS with Docker; or
 - run natively with Node (see below). This also works on Windows.
 
+## Status page
+
+Open `http://<host>:8080/` in a browser. It has three views:
+
+- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Here you can also:
+  - choose the **stream format for that speaker**. Same as default, Detect automatically, or a fixed format. It's saved per speaker and applied immediately: a playing track reloads at its current position.
+  - clear a detected format, so it's detected again.
+  - get a **TV code** for the YouTube app.
+- **Logs** is the last 2000 log lines, live. You can filter by level or text, pause following, and download what's shown.
+- **Stats for nerds** covers:
+  - CPU, memory and throughput graphs (last 10 minutes)
+  - yt-dlp lookup times (median and 95th percentile) and cache hits
+  - downloads, 403 retries, MP4/FLAC build times, and the disk cache
+  - UPnP round trips
+  - per speaker: accepted formats, gapless support, and SOAP errors
+
+The page is meant for your LAN. If other people or devices share that network, set `STATUS_TOKEN` and open the page as `/?token=<token>`. You can also limit it to one address with `STATUS_BIND`, or turn it off with `STATUS_PORT=0`. Requests that change settings must come from the page itself, so other websites can't send them from your browser.
+
 ## Running without Docker
 
 You need Node.js 20 or later (22 recommended), yt-dlp, and optionally ffmpeg.
@@ -84,7 +102,9 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `ADVERTISE_IP` | auto | IP that renderers and phones use to reach us. By default it's auto-detected per renderer from the routing table. Setting it also pins DIAL to that address. |
 | `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each renderer takes the next free port. |
 | `MEDIA_PORT` | `8000` | Streaming port |
-| `STATUS_PORT` | `8080` | Status page and pairing codes. `0` disables it. |
+| `STATUS_PORT` | `8080` | Status page. `0` disables it. |
+| `STATUS_TOKEN` | – | If set, the status page's API requires this token (open the page as `/?token=…`) |
+| `STATUS_BIND` | all interfaces | Address the status page listens on, e.g. `127.0.0.1` |
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
@@ -141,7 +161,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances. The next track is prepared in advance, and played gaplessly where the renderer supports it.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
-- **Status page** with a JSON API (`/api/renderers`), pairing codes and `/healthz`.
+- **Status page:** now playing, per-speaker format setting, live logs, stats for nerds, pairing codes. JSON API and `/healthz`, optional token, CSRF protection.
 - **Packaging:** Node 22 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
 
 ## CI (GitHub Actions)
