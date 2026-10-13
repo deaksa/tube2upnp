@@ -20,6 +20,8 @@ services:
       FLAC_BITS: ${FLAC_BITS:-16}             # 16 | 24
       PREFETCH: ${PREFETCH:-true}             # prepare the next track in advance
       GAPLESS: ${GAPLESS:-true}               # hand it to the renderer (SetNextAVTransportURI)
+      SPONSORBLOCK: ${SPONSORBLOCK:-false}    # skip SponsorBlock segments (status page can override)
+      SPONSORBLOCK_CATEGORIES: ${SPONSORBLOCK_CATEGORIES:-music_offtopic,sponsor,selfpromo,interaction}
       ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
       RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
       RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app

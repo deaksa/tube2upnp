@@ -103,6 +103,8 @@
   .segments { display: grid; grid-template-columns: repeat(40, 1fr); gap: 2px; flex: 1; height: .55rem; }
   .segments i { background: var(--vfd-dim); border-radius: 1px; }
   .segments i.on { background: var(--vfd); box-shadow: 0 0 4px rgba(255,181,71,.6); }
+  .segments i.sb { background: #2f4650; }
+  .segments i.sb.on { background: #6fa3b5; box-shadow: none; }
   .time { font-size: .85rem; white-space: nowrap; opacity: .9; }
   .next { margin-top: .5rem; font-size: .85rem; opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .idle .title { color: var(--vfd-text); opacity: .6; text-shadow: none; font-weight: 400; }
@@ -164,6 +166,23 @@
   .spark polyline { fill: none; stroke: var(--vfd); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
   .spark polygon { fill: rgba(255,181,71,.15); }
 
+  /* Settings */
+  .settings { max-width: 44rem; }
+  .settings p { margin: 0 0 .75rem; }
+  .switch { display: flex; align-items: center; gap: .75rem; font-size: 1.05rem; cursor: pointer; margin: 1rem 0; }
+  .switch input { appearance: none; width: 2.75rem; height: 1.5rem; border-radius: 999px; margin: 0;
+    background: var(--plate-edge); position: relative; cursor: pointer; transition: background .2s; flex: none; }
+  .switch input::after { content: ""; position: absolute; top: .2rem; left: .2rem; width: 1.1rem; height: 1.1rem;
+    border-radius: 50%; background: var(--plate); transition: transform .2s; }
+  .switch input:checked { background: var(--led-on); }
+  .switch input:checked::after { transform: translateX(1.25rem); }
+  fieldset { border: 1px solid var(--plate-edge); border-radius: .6rem; padding: .75rem 1rem; margin: 0 0 1rem; }
+  fieldset:disabled { opacity: .5; }
+  legend { padding: 0 .35rem; color: var(--muted); font-size: .9rem; }
+  .check input { accent-color: var(--led-on); }
+  .check { display: flex; gap: .6rem; align-items: baseline; padding: .25rem 0; cursor: pointer; }
+  .check small { color: var(--muted); }
+
   #toast {
     position: fixed; left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
     background: var(--ink); color: var(--plate); padding: .6rem 1rem; border-radius: .5rem;
@@ -180,6 +199,7 @@
     <button role="tab" aria-selected="true" data-view="speakers">Speakers</button>
     <button role="tab" aria-selected="false" data-view="logs">Logs</button>
     <button role="tab" aria-selected="false" data-view="stats">Stats for nerds</button>
+    <button role="tab" aria-selected="false" data-view="settings">Settings</button>
   </nav>
 </header>
 
@@ -201,6 +221,8 @@
   </section>
 
   <section id="stats" hidden></section>
+
+  <section id="settings" hidden></section>
 </main>
 <div id="toast" role="status"></div>
 
@@ -249,7 +271,7 @@ const fmtDur = (s) => { const d = Math.floor(s / 86400), hh = Math.floor(s / 360
 const ms = (v) => (v == null ? '–' : v + ' ms');
 
 /* ---------------------------------------------------------------- views */
-const views = { speakers: refreshSpeakers, logs: openLogs, stats: refreshStats };
+const views = { speakers: refreshSpeakers, logs: openLogs, stats: refreshStats, settings: refreshSettings };
 let current = 'speakers';
 document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
 function show(view) {
@@ -308,7 +330,9 @@ function speakerRow(r, app) {
       np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
         'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
       Array.from({ length: 40 }, () => h('i'))), h('span', { class: 'time', 'data-time': r.id })) : null,
-      r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null));
+      r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null,
+      r.sponsorblock?.segments.length ? h('p', { class: 'next' }, 'SponsorBlock: ' + r.sponsorblock.segments.length
+        + (r.sponsorblock.segments.length === 1 ? ' segment' : ' segments') + ' marked, ' + r.sponsorblock.skipped + ' skipped') : null));
 
   const sel = h('select', { 'data-key': 'fmt-' + r.id, onchange: async (e) => {
     const v = e.target.value; e.target.disabled = true;
@@ -362,7 +386,12 @@ function tick() {
     const time = document.querySelector(`[data-time="${CSS.escape(r.id)}"]`);
     if (!meter) continue;
     const lit = p.dur ? Math.round((rel / p.dur) * 40) : 0;
-    meter.querySelectorAll('i').forEach((i, n) => i.classList.toggle('on', n < lit));
+    const segs = r.sponsorblock?.segments ?? [];
+    meter.querySelectorAll('i').forEach((i, n) => {
+      i.classList.toggle('on', n < lit);
+      const a = (n / 40) * p.dur, b = ((n + 1) / 40) * p.dur;
+      i.classList.toggle('sb', Boolean(p.dur) && segs.some((sg) => sg.start < b && sg.end > a));
+    });
     meter.setAttribute('aria-valuenow', Math.round(rel));
     time.textContent = fmtTime(rel) + ' / ' + (p.dur ? fmtTime(p.dur) : '–');
   }
@@ -472,7 +501,9 @@ async function refreshStats() {
         panel('YouTube lookups',
           dl([['Lookups (yt-dlp)', lookups], ['Served from cache', hits + (lookups + hits ? ' (' + Math.round((hits / (lookups + hits)) * 100) + ' %)' : '')],
             ['Failed', c['resolve.failed'] || 0], ['Average time', ms(res.avg)], ['Median / 95th percentile', ms(res.p50) + ' / ' + ms(res.p95)],
-            ['Slowest', ms(res.max)]])),
+            ['Slowest', ms(res.max)],
+            ['SponsorBlock lookups', (c['sponsorblock.lookups'] || 0) + (c['sponsorblock.failed'] ? ' (' + c['sponsorblock.failed'] + ' failed)' : '')],
+            ['SponsorBlock skips', (c['sponsorblock.skips'] || 0) + ' (' + fmtTime(c['sponsorblock.skippedSeconds'] || 0) + ' skipped)']])),
         panel('Downloads and cache',
           dl([['Downloads', dlT.count || 0], ['Downloaded', fmtBytes(c['download.bytes'] || 0)], ['Average download', ms(dlT.avg)],
             ['Refused by YouTube (403)', c['download.forbidden'] || 0], ['Retries', c['download.retries'] || 0], ['Gave up', c['download.failed'] || 0],
@@ -498,6 +529,48 @@ async function refreshStats() {
 }
 setInterval(() => { if (current === 'stats' && !document.hidden) refreshStats(); }, 5000);
 
+/* ------------------------------------------------------------- settings */
+async function refreshSettings() {
+  try {
+    const s = await api('/api/settings');
+    const sb = s.sponsorblock;
+    const save = async (patch, msg) => {
+      try { await api('/api/settings/sponsorblock', { method: 'POST', body: JSON.stringify(patch) }); toast(msg); }
+      catch (err) { toast(err.message); }
+      refreshSettings();
+    };
+    const chosen = new Set(sb.categories);
+    const boxes = Object.entries(s.sponsorblockCategories).map(([key, label]) =>
+      h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: chosen.has(key), 'data-key': 'sbcat-' + key, onchange: (e) => {
+          e.target.checked ? chosen.add(key) : chosen.delete(key);
+          save({ categories: [...chosen] }, 'SponsorBlock categories saved');
+        } }),
+        h('span', {}, label, ' ', h('small', {}, key))));
+    document.getElementById('settings').replaceChildren(h('div', { class: 'settings' },
+      h('h2', {}, 'SponsorBlock'),
+      h('p', {}, 'Skips parts of videos that the SponsorBlock community has marked, such as the talking before a music video starts or a sponsor read. upnpTube seeks past them while the track plays.'),
+      h('label', { class: 'switch' },
+        h('input', { type: 'checkbox', role: 'switch', checked: sb.enabled, 'data-key': 'sb-enabled', onchange: (e) =>
+          save({ enabled: e.target.checked }, e.target.checked ? 'SponsorBlock turned on' : 'SponsorBlock turned off') }),
+        'Skip marked segments'),
+      h('fieldset', { disabled: !sb.enabled }, h('legend', {}, 'Skip these'), boxes),
+      h('p', { class: 'hint' }, sb.fromEnv
+        ? 'Using the defaults from .env (SPONSORBLOCK, SPONSORBLOCK_CATEGORIES). Changes made here are saved and take precedence.'
+        : 'Changed on this page; the .env defaults are ' + (sb.envEnabled ? 'on' : 'off') + ' with ' + sb.envCategories.join(', ') + '. ',
+      sb.fromEnv ? null : h('button', { class: 'btn link', 'data-key': 'sb-reset', onclick: async () => {
+        try { await api('/api/settings/sponsorblock/reset', { method: 'POST' }); toast('SponsorBlock back to the .env defaults'); }
+        catch (err) { toast(err.message); }
+        refreshSettings();
+      } }, 'Use .env defaults')),
+      h('p', { class: 'hint' }, 'Privacy: lookups send only the first four characters of a hash of the video ID, so SponsorBlock cannot tell which video is playing. Seeking back into a skipped part plays it.')));
+    const focusKey = sessionStorage.getItem('focus');
+    if (focusKey) document.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
+  } catch (e) { toast(e.message); }
+}
+document.addEventListener('focusin', (e) => { if (e.target.dataset?.key) sessionStorage.setItem('focus', e.target.dataset.key); });
+
+api('/api/status').then((s) => { document.getElementById('appver').textContent = 'v' + (s.app.version || '?'); }).catch(() => {});
 window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (views[v] && v !== current) show(v); });
 show(views[location.hash.slice(1)] ? location.hash.slice(1) : 'speakers');
 </script>

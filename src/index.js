@@ -6,6 +6,8 @@ import { Logger } from './logger.js';
 import { Ssdp, udnFromUsn, maxAge } from './ssdp.js';
 import { Resolver, scheduleYtdlpUpdates, ytdlpVersion } from './resolver.js';
 import { stats } from './stats.js';
+import { Settings } from './settings.js';
+import { SponsorBlock, CATEGORIES } from './sponsorblock.js';
 import { readFileSync } from 'node:fs';
 import { MediaServer } from './mediaServer.js';
 import { Renderer } from './renderer.js';
@@ -18,6 +20,8 @@ const log = new Logger(config.logLevel, '[upnpTube]');
 const resolver = new Resolver(config, log.child('[yt-dlp]'));
 const mediaServer = new MediaServer(config, resolver, log.child('[media]'));
 const ssdp = new Ssdp(log.child('[ssdp]'));
+const settings = new Settings(config, log.child('[settings]'));
+const sponsorblock = new SponsorBlock(config, settings, log.child('[sponsorblock]'));
 
 /** udn -> Renderer (running) */
 const renderers = new Map();
@@ -62,7 +66,7 @@ async function onAlive(headers, rinfo) {
   const port = allocPort();
   const r = new Renderer({
     udn, location, address: rinfo.address, maxAge: age, port,
-    deps: { config, resolver, mediaServer, logger: log },
+    deps: { config, resolver, mediaServer, sponsorblock, logger: log },
   });
   try {
     const ok = await r.init();
@@ -135,12 +139,17 @@ async function shutdown(sig) {
 }
 
 async function main() {
+  await settings.load();
+  const unknown = config.sponsorblockCategories.filter((c) => !CATEGORIES[c]);
+  if (unknown.length) log.warn(`Unknown SPONSORBLOCK_CATEGORIES ignored by SponsorBlock: ${unknown.join(', ')}`);
+  const sb = settings.sponsorblock;
+  log.info(`SponsorBlock ${sb.enabled ? `on (${sb.categories.join(', ')})` : 'off'}${sb.fromEnv ? '' : ' - set on the status page'}`);
   log.info('Starting upnpTube');
   await checkTools();
   stats.startSampling();
   scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
   await mediaServer.start();
-  if (config.statusPort) startStatusServer(config, { renderers, mediaServer }, log.child('[status]'));
+  if (config.statusPort) startStatusServer(config, { renderers, mediaServer, settings }, log.child('[status]'));
 
   ssdp.on('alive', (h, rinfo) => onAlive(h, rinfo).catch((e) => log.error('alive handler:', e)));
   ssdp.on('byebye', onByebye);

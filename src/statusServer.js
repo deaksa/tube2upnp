@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { recentLogs, onLog } from './logger.js';
 import { stats } from './stats.js';
+import { CATEGORIES } from './sponsorblock.js';
 
 const PAGE = readFileSync(new URL('./ui/index.html', import.meta.url));
 
@@ -50,7 +51,7 @@ function csrfOk(req) {
   return !origin || origin === `http://${req.headers.host}`;
 }
 
-export function startStatusServer(config, { renderers, mediaServer }, log) {
+export function startStatusServer(config, { renderers, mediaServer, settings }, log) {
   const routes = [
     ['GET', /^\/api\/status$/, async () => ({
       app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
@@ -59,6 +60,25 @@ export function startStatusServer(config, { renderers, mediaServer }, log) {
     })],
     ['GET', /^\/api\/stats$/, async () => ({ ...stats.snapshot(), cache: await mediaServer.cacheInfo() })],
     ['GET', /^\/api\/logs$/, async (_m, url) => ({ lines: recentLogs(Number(url.searchParams.get('after')) || 0) })],
+    ['GET', /^\/api\/settings$/, async () => ({
+      sponsorblock: { ...settings.sponsorblock, envEnabled: config.sponsorblock, envCategories: config.sponsorblockCategories },
+      sponsorblockCategories: CATEGORIES,
+    })],
+    ['POST', /^\/api\/settings\/sponsorblock$/, async (_m, _url, req) => {
+      const { enabled, categories } = await readJson(req);
+      if (enabled !== undefined && typeof enabled !== 'boolean') throw Object.assign(new Error('"enabled" must be true or false'), { status: 400 });
+      if (categories !== undefined && (!Array.isArray(categories) || categories.some((c) => !CATEGORIES[c]))) {
+        throw Object.assign(new Error('Unknown SponsorBlock category'), { status: 400 });
+      }
+      await settings.setSponsorblock({ enabled, categories });
+      log.info(`SponsorBlock ${settings.sponsorblock.enabled ? `on (${settings.sponsorblock.categories.join(', ')})` : 'off'} - changed on the status page`);
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/settings\/sponsorblock\/reset$/, async () => {
+      await settings.resetSponsorblock();
+      log.info('SponsorBlock settings reset to the .env defaults');
+      return { ok: true };
+    }],
     ['POST', /^\/api\/renderers\/([^/]+)\/format$/, async (m, _url, req) => {
       const { format } = await readJson(req);
       await renderer(m[1]).setFormatOverride(format ?? null);

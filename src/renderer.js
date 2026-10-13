@@ -6,6 +6,8 @@ import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
+import { fmt as fmtSec } from './sponsorblock.js';
+import { stats } from './stats.js';
 
 export class Renderer extends Player {
   #call;
@@ -22,6 +24,7 @@ export class Renderer extends Player {
   #transport = null;       // last polled transport state
   #position = null;        // { rel, dur, at } from the last poll
   #soap = { calls: 0, errors: 0, totalMs: 0 };
+  #sb = { videoId: null, segments: [], skipped: new Set(), loading: false, timer: null };
   #polls = 0;
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
@@ -47,6 +50,7 @@ export class Renderer extends Player {
     this.port = port;
     this.cfg = deps.config;
     this.resolver = deps.resolver;
+    this.sponsorblock = deps.sponsorblock ?? null;
     this.media = deps.mediaServer;
     this.createReceiver = deps.createReceiver ?? ((player, opts) => new YouTubeCastReceiver(player, opts));
     this.baseLog = deps.logger;
@@ -170,6 +174,7 @@ export class Renderer extends Player {
 
   async destroy() {
     this.#stopPolling();
+    this.#resetSkips();
     try {
       if (this.#receiver?.status === 'running') await this.#receiver.stop();
     } catch (err) {
@@ -278,6 +283,8 @@ export class Renderer extends Player {
 
   /** Make `item` the current track (after we loaded it, or the renderer switched to it). */
   #adopt(item, alreadyPlaying) {
+    // A reload of the same video (seek restart, format change) keeps its skip state.
+    if (this.#current?.video.id !== item.current.video.id) this.#resetSkips();
     item.current.loadedAt = Date.now();
     this.#current = item.current;
     this.nowPlaying = {
@@ -289,6 +296,66 @@ export class Renderer extends Player {
     this.#sawPlaying = alreadyPlaying;
     this.#expectStop = false;
     this.#startPolling();
+  }
+
+  // --------------------------------------------------------------- SponsorBlock
+
+  #resetSkips() {
+    clearTimeout(this.#sb.timer);
+    this.#sb = { videoId: null, segments: [], skipped: new Set(), loading: false, timer: null };
+  }
+
+  /** Current position, extrapolated from the last poll. */
+  #livePosition() {
+    const p = this.#position;
+    if (!p) return null;
+    return p.rel + (this.#transport === 'PLAYING' ? (Date.now() - p.at) / 1000 : 0);
+  }
+
+  /** Skip if we're inside a segment; arm a timer if the next one starts before the next poll. */
+  async #checkSkip() {
+    const sb = this.sponsorblock;
+    const id = this.#current?.video.id;
+    if (!sb?.enabled || !id) return;
+    if (this.#sb.videoId !== id) {
+      if (this.#sb.loading) return;
+      this.#sb.loading = true;
+      const segments = await sb.segments(id);
+      if (this.#current?.video.id !== id) return;
+      Object.assign(this.#sb, { videoId: id, segments, loading: false });
+    }
+    if (this.#transport !== 'PLAYING' || this.status !== PLAYER_STATUSES.PLAYING) return;
+    const pos = this.#livePosition();
+    if (pos == null) return;
+
+    const seg = this.#sb.segments.find((s) => !this.#sb.skipped.has(s.start) && pos >= s.start - 0.3 && pos < s.end - 0.75);
+    if (seg) return this.#skip(seg);
+
+    clearTimeout(this.#sb.timer);
+    const next = this.#sb.segments.find((s) => !this.#sb.skipped.has(s.start) && s.start > pos);
+    const wait = next ? (next.start - pos) * 1000 : Infinity;
+    if (wait < this.cfg.pollIntervalMs + 500) {
+      this.#sb.timer = setTimeout(() => this.#checkSkip().catch(() => {}), Math.max(0, wait));
+      this.#sb.timer.unref?.();
+    }
+  }
+
+  async #skip(seg) {
+    this.#sb.skipped.add(seg.start); // once per play: seeking back into it by hand still works
+    stats.inc('sponsorblock.skips');
+    stats.inc('sponsorblock.skippedSeconds', Math.round(seg.end - seg.start));
+    const dur = this.nowPlaying?.duration ?? 0;
+    if (dur && seg.end >= dur - 1.5) {
+      this.log.info(`SponsorBlock: ${seg.category} from ${fmtSec(seg.start)} runs to the end - skipping to the next track`);
+      this.#stopPolling();
+      await this.next();
+      return;
+    }
+    this.log.info(`SponsorBlock: skipped ${fmtSec(seg.start)}-${fmtSec(seg.end)} (${seg.category})`);
+    if (await this.doSeek(seg.end)) {
+      this.#position = { ...this.#position, rel: seg.end, at: Date.now() };
+      await this.notifyExternalStateChange(PLAYER_STATUSES.PLAYING); // updates the app's progress bar
+    }
   }
 
   // ------------------------------------------------------ next-track prefetch
@@ -403,6 +470,7 @@ export class Renderer extends Player {
 
   async doStop() {
     this.#loadSeq++; // cancel any pending load
+    this.#resetSkips();
     this.#position = null;
     this.#transport = 'STOPPED';
     this.#current = null;
@@ -514,6 +582,8 @@ export class Renderer extends Player {
       // Position extrapolated from the last poll so the page's progress bar moves smoothly.
       position: p ? { rel: p.rel + (playing ? (Date.now() - p.at) / 1000 : 0), dur: p.dur, playing } : null,
       upNext: this.upNext,
+      sponsorblock: this.#sb.videoId && this.#sb.videoId === this.#current?.video.id
+        ? { segments: this.#sb.segments, skipped: this.#sb.skipped.size } : null,
       lastError: this.lastError,
       format: {
         mode: this.formatMode, override: this.#formatOverride, global: this.cfg.outputFormat,
@@ -638,6 +708,7 @@ export class Renderer extends Player {
         return;
       }
       this.#maintainNext().catch(() => {}); // background: don't hold up polling
+      this.#checkSkip().catch((err) => this.log.debug('SponsorBlock check failed:', err.message));
     } else if (state === 'PAUSED_PLAYBACK') {
       if (this.status === PLAYER_STATUSES.PLAYING) await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
     } else if ((state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') && this.#sawPlaying

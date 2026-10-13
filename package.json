@@ -1,6 +1,6 @@
 {
   "name": "upnptube",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Cast from the YouTube / YouTube Music apps to DLNA/UPnP renderers",
   "type": "module",
   "main": "src/index.js",

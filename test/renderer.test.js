@@ -17,7 +17,7 @@ class FakeReceiver extends EventEmitter {
   getConnectedSenders() { return []; }
 }
 
-function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-'))) {
+function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-')), extraDeps = {}) {
   let receiverOpts;
   const registered = [];
   const resolves = [];
@@ -42,6 +42,7 @@ function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), '
         },
       },
       createReceiver: (_p, opts) => { receiverOpts = opts; return new FakeReceiver(); },
+      ...extraDeps,
     },
   });
   return { r, registered, resolves, opts: () => receiverOpts };
@@ -290,4 +291,54 @@ test('per-renderer format override wins over the global setting and is persisted
   await again.r.doPlay({ id: A }, 0);
   assert.equal(again.registered.at(-1).format, 'mp4', 'back to the global setting');
   await again.r.destroy();
+});
+
+test('SponsorBlock: seeks past a segment the renderer is inside', async (t) => {
+  const fake = await startFakeRenderer(); // reports RelTime 0:01:05
+  t.after(() => fake.server.close());
+  const sponsorblock = { enabled: true, segments: async () => [{ start: 60, end: 90, category: 'music_offtopic' }] };
+  const { r } = setup(fake, {}, undefined, { sponsorblock });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  await wait(400);
+  const seek = fake.calls.find((c) => c.action === 'Seek');
+  assert.ok(seek, 'seeked');
+  assert.match(seek.body, /<Target>00:01:30<\/Target>/);
+  assert.equal(r.statusInfo().sponsorblock.skipped, 1);
+  const seeks = fake.calls.filter((c) => c.action === 'Seek').length;
+  await wait(300);
+  assert.equal(fake.calls.filter((c) => c.action === 'Seek').length, seeks, 'each segment skipped once');
+  await r.destroy();
+});
+
+test('SponsorBlock: a segment running to the end skips to the next track', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const sponsorblock = { enabled: true, segments: async () => [{ start: 60, end: 210, category: 'outro' }] };
+  const { r } = setup(fake, {}, undefined, { sponsorblock });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  await wait(400);
+  assert.equal(nexts, 1);
+  assert.ok(!fake.calls.some((c) => c.action === 'Seek'));
+  await r.destroy();
+});
+
+test('SponsorBlock off: no lookups, no seeks', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  let lookups = 0;
+  const sponsorblock = { enabled: false, segments: async () => { lookups++; return [{ start: 60, end: 90, category: 'x' }]; } };
+  const { r } = setup(fake, {}, undefined, { sponsorblock });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  await wait(300);
+  assert.equal(lookups, 0);
+  assert.ok(!fake.calls.some((c) => c.action === 'Seek'));
+  await r.destroy();
 });

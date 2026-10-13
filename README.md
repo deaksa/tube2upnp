@@ -38,6 +38,17 @@ While a song plays, upnpTube prepares the next one from the YouTube queue, or th
 
 If the renderer supports `SetNextAVTransportURI`, the next track is also handed to it in advance, so it plays on with no gap (useful for live albums and mixes). upnpTube notices the switch and moves the YouTube queue along. Renderers without it simply get the prepared track the moment the current one ends. If you edit the queue in the app, the prepared track is replaced. Turn it off with `PREFETCH=false` or `GAPLESS=false`.
 
+### SponsorBlock (off by default)
+
+[SponsorBlock](https://sponsor.ajay.app) is a community database of video segments: the talking before a music video starts, sponsor reads, intros and so on. When it's on, upnpTube looks up each track's segments and seeks past them while the track plays:
+- **Seekable formats** (direct, MP4, FLAC) jump within the track. MP3 and the AAC stream restart at the new position.
+- **A segment that runs to the end** of the track skips straight to the next one.
+- The YouTube app's progress bar follows the jump. Seeking back into a skipped part plays it.
+
+Turn it on with `SPONSORBLOCK=true`, and choose what to skip with `SPONSORBLOCK_CATEGORIES`. The default is `music_offtopic,sponsor,selfpromo,interaction`; the full list is `music_offtopic`, `sponsor`, `selfpromo`, `interaction`, `intro`, `outro`, `preview` and `filler`. You can also switch it on the status page's **Settings** view. Changes made there are saved in `DATA_DIR/settings.json` and take precedence over `.env` until you choose **Use .env defaults**.
+
+Lookups use SponsorBlock's privacy-preserving API: only the first 4 characters of a SHA-256 hash of the video ID are sent, and the results are filtered locally. If SponsorBlock is unreachable, tracks simply play without skips.
+
 ## Quick start (Docker, Linux host)
 
 ```sh
@@ -62,7 +73,7 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 ## Status page
 
-Open `http://<host>:8080/` in a browser. It has three views:
+Open `http://<host>:8080/` in a browser. It has four views:
 
 - **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Here you can also:
   - choose the **stream format for that speaker**. Same as default, Detect automatically, or a fixed format. It's saved per speaker and applied immediately: a playing track reloads at its current position.
@@ -75,6 +86,7 @@ Open `http://<host>:8080/` in a browser. It has three views:
   - downloads, 403 retries, MP4/FLAC build times, and the disk cache
   - UPnP round trips
   - per speaker: accepted formats, gapless support, and SOAP errors
+- **Settings:** SponsorBlock on or off, and which categories to skip.
 
 The page is meant for your LAN. If other people or devices share that network, set `STATUS_TOKEN` and open the page as `/?token=<token>`. You can also limit it to one address with `STATUS_BIND`, or turn it off with `STATUS_PORT=0`. Requests that change settings must come from the page itself, so other websites can't send them from your browser.
 
@@ -124,6 +136,9 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
 | `PREFETCH` | `true` | Prepare the next track while the current one plays |
 | `GAPLESS` | `true` | Queue it on the renderer with `SetNextAVTransportURI` when supported |
+| `SPONSORBLOCK` | `false` | Skip SponsorBlock segments (see [SponsorBlock](#sponsorblock-off-by-default)). The status page can override it. |
+| `SPONSORBLOCK_CATEGORIES` | `music_offtopic,sponsor,selfpromo,interaction` | Comma-separated categories to skip |
+| `SPONSORBLOCK_API` | `https://sponsor.ajay.app` | SponsorBlock server (or a mirror) |
 | `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
 
 ## Troubleshooting

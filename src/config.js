@@ -101,6 +101,13 @@ export const config = Object.freeze({
 
   autoplayOnConnect: bool('AUTOPLAY', true),
 
+  // SponsorBlock: skip community-marked segments (off by default; also switchable
+  // on the status page, which then takes precedence).
+  sponsorblock: bool('SPONSORBLOCK', false),
+  sponsorblockCategories: str('SPONSORBLOCK_CATEGORIES', 'music_offtopic,sponsor,selfpromo,interaction')
+    .split(',').map((c) => c.trim()).filter(Boolean),
+  sponsorblockApi: str('SPONSORBLOCK_API', 'https://sponsor.ajay.app'),
+
   // Prepare the next track in the queue while the current one plays (instant skip).
   prefetch: bool('PREFETCH', true),
   // Also hand it to the renderer with SetNextAVTransportURI for gapless playback.

@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startStatusServer } from '../src/statusServer.js';
 import { Logger, recentLogs } from '../src/logger.js';
+import { Settings } from '../src/settings.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 function fakeRenderer() {
   const calls = [];
@@ -16,12 +20,15 @@ function fakeRenderer() {
 
 async function start(t, cfg = {}) {
   const r = fakeRenderer();
-  const server = startStatusServer({ statusPort: 0, outputFormat: 'mp4', ...cfg },
-    { renderers: new Map([['r1', r]]), mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
+  const conf = { statusPort: 0, outputFormat: 'mp4', dataDir: mkdtempSync(path.join(tmpdir(), 'st-')),
+    sponsorblock: false, sponsorblockCategories: ['sponsor'], ...cfg };
+  const settings = await new Settings(conf, new Logger('none')).load();
+  const server = startStatusServer(conf,
+    { renderers: new Map([['r1', r]]), settings, mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
     new Logger('none'));
   await new Promise((res) => server.once('listening', res));
   t.after(() => server.close());
-  return { base: `http://127.0.0.1:${server.address().port}`, r };
+  return { base: `http://127.0.0.1:${server.address().port}`, r, settings };
 }
 
 const post = (url, body, headers = {}) => fetch(url, {
@@ -80,4 +87,17 @@ test('logs: ring buffer and live stream', async (t) => {
   ctrl.abort();
   assert.match(buf, /"level":"warn"/);
   assert.doesNotMatch(buf, /hello/, 'only lines after the given id');
+});
+
+test('SponsorBlock settings: read, change (validated, CSRF-protected), reset', async (t) => {
+  const { base, settings } = await start(t);
+  const get = async () => (await (await fetch(base + '/api/settings')).json()).sponsorblock;
+  assert.equal((await get()).enabled, false);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: true })).status, 403);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: 'yes' }, { 'X-Upnptube': '1' })).status, 400);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { categories: ['bogus'] }, { 'X-Upnptube': '1' })).status, 400);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: true, categories: ['music_offtopic'] }, { 'X-Upnptube': '1' })).status, 200);
+  assert.deepEqual(settings.sponsorblock, { enabled: true, categories: ['music_offtopic'], fromEnv: false });
+  assert.equal((await post(base + '/api/settings/sponsorblock/reset', {}, { 'X-Upnptube': '1' })).status, 200);
+  assert.equal((await get()).enabled, false);
 });
