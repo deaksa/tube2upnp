@@ -63,11 +63,23 @@ export const config = Object.freeze({
   ytdlpUpdateHours: int('YTDLP_UPDATE_HOURS', 24),
   ytdlpUpdateCmd: str('YTDLP_UPDATE_CMD', ''),
 
-  // Transcoding: "auto" (only if the renderer doesn't advertise the source type),
-  // "always" (always send MP3) or "never".
-  transcode: str('TRANSCODE', 'auto'),
+  // Stream format sent to renderers: auto | direct | mp4 | adts | mp3 (see formats.js).
+  // "auto" tries direct -> mp4 -> adts -> mp3 and remembers what works per renderer.
+  // Legacy TRANSCODE=always|never maps to mp3|direct.
+  outputFormat: (() => {
+    const f = str('OUTPUT_FORMAT', '');
+    if (f) {
+      if (!['auto', 'direct', 'mp4', 'adts', 'mp3'].includes(f)) throw new Error(`OUTPUT_FORMAT "${f}" is not valid`);
+      return f;
+    }
+    return { always: 'mp3', never: 'direct' }[str('TRANSCODE', 'auto')] ?? 'auto';
+  })(),
   ffmpegPath: str('FFMPEG_PATH', 'ffmpeg'),
   mp3Bitrate: str('MP3_BITRATE', '192k'),
+
+  // Disk cache for remuxed MP4 files (mp4 format).
+  cacheDir: str('CACHE_DIR', null),
+  cacheMb: int('CACHE_MB', 512),
 
   // Persistent data (screen IDs per renderer so phones remember them).
   dataDir: str('DATA_DIR', './data'),

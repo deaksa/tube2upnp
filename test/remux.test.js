@@ -1,0 +1,95 @@
+// Real ffmpeg round-trips on a fragmented M4A (what YouTube serves). Skipped without ffmpeg.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { MediaServer, parseRange } from '../src/mediaServer.js';
+import { Logger } from '../src/logger.js';
+
+let hasFfmpeg = true;
+try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFfmpeg = false; }
+
+const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+
+async function harness(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'remux-'));
+  const src = path.join(dir, 'src.m4a');
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=60',
+    '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', src]);
+  const file = readFileSync(src);
+  const up = http.createServer((req, res) => {
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
+    if (m) {
+      const a = +m[1]; const b = m[2] ? +m[2] : file.length - 1;
+      res.writeHead(206, { 'content-range': `bytes ${a}-${b}/${file.length}`, 'content-length': b - a + 1, 'accept-ranges': 'bytes' });
+      return res.end(file.subarray(a, b + 1));
+    }
+    res.writeHead(200, { 'content-length': file.length, 'accept-ranges': 'bytes' }).end(file);
+  });
+  await new Promise((r) => up.listen(0, '127.0.0.1', r));
+  const ms = new MediaServer(
+    { mediaPort: 0, ffmpegPath: 'ffmpeg', mp3Bitrate: '128k', cacheDir: path.join(dir, 'cache'), cacheMb: 64 },
+    { resolve: async () => ({ url: `http://127.0.0.1:${up.address().port}/s.m4a`, headers: { 'User-Agent': 'test' } }) },
+    new Logger('none'));
+  await ms.start();
+  t.after(() => { ms.stop(); up.close(); });
+  const get = async (entry, headers = {}) => {
+    await ms.prepare(entry);
+    const res = await fetch(`http://127.0.0.1:${ms.port}${ms.register(entry)}`, { headers });
+    const out = path.join(dir, `out-${Math.random().toString(36).slice(2)}`);
+    writeFileSync(out, Buffer.from(await res.arrayBuffer()));
+    return { res, out };
+  };
+  return { get };
+}
+
+test('mp4: lossless remux to a non-fragmented, faststart MP4 with byte ranges', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t);
+  const { res, out } = await get({ videoId: 'aaaaaaaaaaa', format: 'mp4', ext: 'm4a' });
+  assert.equal(res.headers.get('content-type'), 'audio/mp4');
+  assert.ok(Number(res.headers.get('content-length')) > 0);
+  assert.equal(probe(out, 'stream=codec_name'), 'aac');                        // not re-encoded
+  assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 60) < 0.5);
+  const bytes = readFileSync(out);
+  assert.ok(bytes.indexOf('moov') < bytes.indexOf('mdat'), 'index (moov) before data: faststart');
+  assert.equal(bytes.indexOf('moof'), -1, 'not fragmented');
+
+  const ranged = await get({ videoId: 'aaaaaaaaaaa', format: 'mp4', ext: 'm4a' }, { Range: 'bytes=100-199' });
+  assert.equal(ranged.res.status, 206);
+  assert.equal(readFileSync(ranged.out).length, 100);
+});
+
+test('mp4 at offset (renderer cannot Seek)', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t);
+  const { out } = await get({ videoId: 'bbbbbbbbbbb', format: 'mp4', ext: 'm4a', startAt: 45 });
+  assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 15) < 0.5);
+});
+
+test('adts: lossless AAC stream, starts at offset', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t);
+  const { res, out } = await get({ videoId: 'ccccccccccc', format: 'adts', ext: 'm4a', startAt: 30 });
+  assert.equal(res.headers.get('content-type'), 'audio/aac');
+  assert.match(res.headers.get('contentfeatures.dlna.org'), /AAC_ADTS/);
+  assert.equal(probe(out, 'stream=codec_name'), 'aac');
+  assert.equal(probe(out, 'format=format_name'), 'aac');
+  // ADTS has no index; ffprobe estimates duration from bitrate, so allow slack.
+  assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 30) < 3);
+});
+
+test('mp3 transcode', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t);
+  const { res, out } = await get({ videoId: 'ddddddddddd', format: 'mp3', ext: 'm4a' });
+  assert.equal(res.headers.get('content-type'), 'audio/mpeg');
+  assert.equal(probe(out, 'stream=codec_name'), 'mp3');
+});
+
+test('range parsing', () => {
+  assert.deepEqual(parseRange('bytes=0-', 10), { start: 0, end: 9 });
+  assert.deepEqual(parseRange('bytes=-3', 10), { start: 7, end: 9 });
+  assert.deepEqual(parseRange('bytes=5-100', 10), { start: 5, end: 9 });
+  assert.equal(parseRange('bytes=20-', 10), 'invalid');
+  assert.equal(parseRange('items=1-2', 10), null);
+});

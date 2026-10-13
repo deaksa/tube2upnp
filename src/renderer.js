@@ -5,7 +5,7 @@ import { RendererDataStore } from './dataStore.js';
 import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
-
+import { FORMATS, FALLBACK_CHAIN, dlnaFeatures, mimeOf } from './formats.js';
 
 export class Renderer extends Player {
   #call;
@@ -16,8 +16,9 @@ export class Renderer extends Player {
   #loadSeq = 0;            // invalidates stale async loads when the user skips quickly
   #protocols = null;
   #ip = null;
-  #forceTranscode = false; // learned: this renderer needs MP3
-  #current = null;         // { video, transcode, loadedAt, fetched, retried }
+  #store = null;
+  #learnedFormat = null;   // format that worked on this renderer (persisted)
+  #current = null;         // { video, format, startAt, loadedAt, fetched }
 
   /**
    * @param {object} p
@@ -102,6 +103,13 @@ export class Renderer extends Player {
 
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
+    this.#store = new RendererDataStore(this.cfg.dataDir, this.udn);
+    const learned = await this.#store.get('upnptube.format');
+    if (FORMATS[learned]) {
+      this.#learnedFormat = learned;
+      this.log.info(`Using previously detected stream format "${learned}"`);
+    }
+
     this.#receiver = this.createReceiver(this, {
       // DIAL answers on every interface unless ADVERTISE_IP pins it (phone and speaker
       // may live on different VLANs).
@@ -112,7 +120,7 @@ export class Renderer extends Player {
         brand: desc.manufacturer || 'upnpTube',
         model: desc.modelName || 'UPnP Renderer',
       },
-      dataStore: new RendererDataStore(this.cfg.dataDir, this.udn),
+      dataStore: this.#store,
       logger: this.baseLog.child(`[ytcr ${desc.friendlyName}]`),
       logLevel: this.cfg.logLevel,
     });
@@ -156,33 +164,38 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
-    return this.#load(video, position, false);
+    return this.#load(video, position);
   }
 
-  async #load(video, position, forceTranscode) {
+  /**
+   * @param {object} video
+   * @param {number} position  - start position in seconds
+   * @param {string} [format]  - force a format (fallback, seek restart)
+   * @param {{offsetStart?:boolean}} [opts] - start the stream itself at `position`
+   */
+  async #load(video, position, format = null, { offsetStart = false } = {}) {
     const seq = ++this.#loadSeq;
     this.#stopPolling();
     try {
       const info = await this.resolver.resolve(video.id);
       if (seq !== this.#loadSeq) return false; // superseded by a newer play()
 
-      const transcode = forceTranscode || this.#shouldTranscode(info.mime);
-      const mime = transcode ? 'audio/mpeg' : info.mime;
-      // A transcoded MP3 stream can't be byte-range seeked, so start ffmpeg at the offset instead.
-      const startAt = transcode && position > 1 ? Math.floor(position) : 0;
-      const current = { video, transcode, startAt, loadedAt: Date.now(), fetched: false, retried: forceTranscode };
-      const path = this.media.register({
-        videoId: video.id, transcode, ext: info.ext, startAt,
+      format ??= this.#chooseFormat(info.mime);
+      const mime = mimeOf(format, info.mime);
+      // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
+      const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
+      const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false };
+      const entry = {
+        videoId: video.id, format, ext: info.ext, startAt,
         onRequest: () => {
-          if (!current.fetched) this.log.info(`Renderer started fetching the ${transcode ? 'MP3' : info.ext} stream`);
+          if (!current.fetched) this.log.info(`Renderer started fetching the stream (${format})`);
           current.fetched = true;
         },
-      });
-      const url = `http://${this.#ip}:${this.cfg.mediaPort}${path}`;
-      const dlna = transcode
-        ? 'DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000'
-        : 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000';
-      const protocolInfo = `http-get:*:${mime}:${dlna}`;
+      };
+      await this.media.prepare(entry); // mp4: remux before the renderer asks for it
+      if (seq !== this.#loadSeq) return false;
+      const url = `http://${this.#ip}:${this.cfg.mediaPort}${this.media.register(entry)}`;
+      const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
 
       this.#expectStop = true;
       await this.#safeCall('AVTransport', 'Stop', { InstanceID: 0 });
@@ -200,18 +213,19 @@ export class Renderer extends Player {
       await this.#call('AVTransport', 'Play', { InstanceID: 0, Speed: 1 });
       if (seq !== this.#loadSeq) return false;
 
-      if (position > 1 && !transcode) {
+      if (position > 1 && !startAt) {
         await this.#waitForState(['PLAYING'], 8000);
         await this.#safeCall('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
       }
 
+      current.loadedAt = Date.now();
       this.#current = current;
-      this.nowPlaying = { videoId: video.id, title: info.title, artist: info.artist, duration: info.duration, transcode };
+      this.nowPlaying = { videoId: video.id, title: info.title, artist: info.artist, duration: info.duration, format };
       this.lastError = null;
       this.#sawPlaying = false;
       this.#expectStop = false;
       this.#startPolling();
-      this.log.info(`Sent "${info.title}" to renderer${transcode ? ' (MP3 transcode)' : ` (${info.mime})`}`);
+      this.log.info(`Sent "${info.title}" to renderer as ${format} (${mime})`);
       return true;
     } catch (err) {
       this.lastError = err.message;
@@ -221,14 +235,17 @@ export class Renderer extends Player {
     }
   }
 
-  /** The renderer accepted the URL but never started playing: retry once as MP3. */
+  /** The renderer accepted the URL but never started playing: try the next format. */
   async #handleStartFailure() {
     const c = this.#current;
     const why = c.fetched ? 'fetched the stream but never started playing' : 'never requested the stream';
-    if (!c.transcode && !c.retried && this.cfg.transcode === 'auto') {
-      this.log.warn(`Renderer ${why} - retrying as MP3 and using MP3 for this renderer from now on`);
-      this.#forceTranscode = true;
-      await this.#load(c.video, 0, true);
+    const next = this.cfg.outputFormat === 'auto' ? this.#nextFormat(c.format) : null;
+    // Not even fetching usually means a network problem, not a format problem - but
+    // some renderers reject unsupported types without fetching, so still try the next one.
+    if (next) {
+      this.log.warn(`Renderer ${why} as ${c.format} - trying ${next}`);
+      this.#learnedFormat = null;
+      await this.#load(c.video, c.startAt, next);
       return;
     }
     this.lastError = `Renderer ${why}`;
@@ -236,6 +253,15 @@ export class Renderer extends Player {
       + `http://${this.#ip}:${this.cfg.mediaPort} (firewall, ADVERTISE_IP).`}`);
     this.#stopPolling();
     await this.notifyExternalStateChange(PLAYER_STATUSES.STOPPED);
+  }
+
+  /** Called once the renderer reaches PLAYING: remember what worked. */
+  async #confirmFormat() {
+    const f = this.#current?.format;
+    if (!f || this.cfg.outputFormat !== 'auto' || this.#learnedFormat === f) return;
+    this.#learnedFormat = f;
+    await this.#store?.set('upnptube.format', f);
+    this.log.info(`Stream format "${f}" works on this renderer - remembered`);
   }
 
   async doPause() {
@@ -258,13 +284,18 @@ export class Renderer extends Player {
 
   async doSeek(position) {
     const c = this.#current;
-    if (c?.transcode) {
-      // Restart the MP3 stream from the new position. Takes a moment longer than a
+    if (!c) return false;
+    if (!FORMATS[c.format].seekable) {
+      // Restart the stream from the new position. Takes a moment longer than a
       // native seek (ffmpeg has to reconnect), but works on every renderer.
-      this.log.info(`Seek to ${Math.floor(position)}s by restarting the MP3 stream`);
-      return this.#load(c.video, position, true);
+      this.log.info(`Seek to ${Math.floor(position)}s by restarting the ${c.format} stream`);
+      return this.#load(c.video, position, c.format);
     }
-    return this.#ok('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
+    if (await this.#ok('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) })) return true;
+    if (c.format !== 'mp4') return false;
+    // Renderer rejected Seek: remux a new MP4 that starts at the position (still lossless).
+    this.log.info(`Renderer rejected Seek - restarting MP4 at ${Math.floor(position)}s`);
+    return this.#load(c.video, position, 'mp4', { offsetStart: true });
   }
 
   async doSetVolume(volume) {
@@ -292,8 +323,8 @@ export class Renderer extends Player {
   }
 
   async doGetDuration() {
-    // While transcoding the renderer only knows the (remaining) stream length, if anything.
-    if (this.#current?.transcode && this.nowPlaying?.duration) return this.nowPlaying.duration;
+    // For offset streams the renderer only knows the remaining length, if anything.
+    if (this.#current?.startAt && this.nowPlaying?.duration) return this.nowPlaying.duration;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     const d = r ? parseHms(r.TrackDuration) : 0;
     return d || this.nowPlaying?.duration || 0;
@@ -301,15 +332,18 @@ export class Renderer extends Player {
 
   // ------------------------------------------------------------------ internals
 
-  #shouldTranscode(mime) {
-    if (this.cfg.transcode === 'always' || this.#forceTranscode) return true;
-    if (this.cfg.transcode === 'never') return false;
-    const accepted = sinkAccepts(this.#protocols, mime);
-    if (accepted === false) {
-      this.log.info(`Renderer does not advertise ${mime} - transcoding to MP3`);
-      return true;
-    }
-    return false;
+  #chooseFormat(sourceMime) {
+    if (this.cfg.outputFormat !== 'auto') return this.cfg.outputFormat;
+    if (this.#learnedFormat) return this.#learnedFormat;
+    // First format in the chain the renderer claims to support (unknown list = try it).
+    return FALLBACK_CHAIN.find((f) => f === 'mp3'
+      || sinkAccepts(this.#protocols, mimeOf(f, sourceMime)) !== false);
+  }
+
+  #nextFormat(format) {
+    const i = FALLBACK_CHAIN.indexOf(format);
+    return FALLBACK_CHAIN.slice(i + 1).find((f) => f === 'mp3'
+      || sinkAccepts(this.#protocols, mimeOf(f, this.#current?.mime)) !== false) ?? null;
   }
 
   async #ok(service, action, params) {
@@ -373,6 +407,7 @@ export class Renderer extends Player {
     }
 
     if (state === 'PLAYING') {
+      if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
       if (this.status === PLAYER_STATUSES.PAUSED) await this.notifyExternalStateChange(PLAYER_STATUSES.PLAYING);
     } else if (state === 'PAUSED_PLAYBACK') {

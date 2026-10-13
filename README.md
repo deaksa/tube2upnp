@@ -13,8 +13,21 @@ YouTube app ──DIAL/lounge──▶ upnpTube (one cast receiver per renderer)
                                  │ yt-dlp resolves the video ID to a stream URL
                                  ▼
 Renderer ◀──HTTP /stream/<token>── media server ──HTTPS──▶ googlevideo.com
-         (or MP3 via ffmpeg if the renderer can't play AAC/M4A)
+         (as-is, losslessly remuxed with ffmpeg, or MP3 as a last resort)
 ```
+
+### Stream formats
+
+YouTube serves AAC audio in *fragmented* MP4 (DASH). Many renderers say they play `audio/mp4` but can't handle the fragmented variant. upnpTube can deliver the same audio four ways:
+
+| `OUTPUT_FORMAT` | What the renderer gets | Quality | Seeking |
+|---|---|---|---|
+| `direct` | YouTube's stream, proxied | original | native |
+| `mp4` | Regular MP4, index at the front (remuxed, not re-encoded). The track is downloaded first, which takes 1–3 s for a song, and cached on disk. | original | native; if the renderer refuses, a new MP4 starting at the position |
+| `adts` | Raw AAC stream, the format internet radios use (remuxed, not re-encoded). Starts immediately. | original | stream restarted at the position |
+| `mp3` | Re-encoded MP3 | lossy (`MP3_BITRATE`) | stream restarted at the position |
+
+With `auto` (the default), upnpTube tries them in that order, skipping formats the renderer says it doesn't support. If a renderer hasn't started playing after `START_TIMEOUT_MS`, the next format is tried. The first one that plays is remembered for that renderer, across restarts. To re-detect, delete the renderer's folder in `DATA_DIR`.
 
 The renderer gets a short `http://<host>:8000/stream/<random>.m4a` URL. upnpTube proxies it to YouTube's HTTPS stream and passes Range requests through, so seeking works. Most renderers can't do HTTPS and many choke on YouTube's 1–2 KB URLs.
 
@@ -62,7 +75,8 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 | `STATUS_PORT` | `8080` | Status page and pairing codes. `0` disables it. |
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
-| `TRANSCODE` | `auto` | `auto` transcodes to MP3 only if the renderer doesn't advertise the source type. Other values: `always`, `never`. |
+| `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
+| `CACHE_DIR` / `CACHE_MB` | temp dir / `512` | Where remuxed MP4 files are kept, and the size cap |
 | `MP3_BITRATE` | `192k` | Bitrate used when transcoding |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |
 | `YTDLP_JS_RUNTIME` | `node` | Passed to `--js-runtimes`. Empty disables it. |
@@ -71,7 +85,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
 | `DATA_DIR` | `./data` (`/data` in Docker) | Per-renderer screen IDs, so phones remember the receivers |
-| `START_TIMEOUT_MS` | `12000` | Retry as MP3 if the renderer hasn't started playing by then |
+| `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
 | `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
@@ -86,11 +100,11 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 **It casts, but nothing plays.**
 - Run with `LOG_LEVEL=debug`. You'll see whether the renderer ever requests `/stream/...`.
 - If it never connects, set `ADVERTISE_IP` to the LAN address and check the firewall on `MEDIA_PORT`.
-- If the renderer accepts the URL but doesn't start within `START_TIMEOUT_MS` (12 s), upnpTube retries the track as MP3 and keeps using MP3 for that renderer until restart. Many renderers advertise `audio/mp4` but can't play YouTube's fragmented DASH M4A. If that happens every time, set `TRANSCODE=always` so playback starts right away.
+- With `OUTPUT_FORMAT=auto`, a renderer that doesn't start is tried with the next format, and the winner is remembered. To find the right one by hand, set `OUTPUT_FORMAT` to `mp4`, then `adts`, then `mp3`, and keep the first that plays.
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).** Update yt-dlp first, which happens automatically by default. If the server's IP is flagged by YouTube, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
 
-**Seeking.** For direct (M4A) streams the renderer seeks natively, if it implements `Seek`. While transcoding, upnpTube restarts the MP3 stream from the new position, so a seek takes a second or two longer.
+**Seeking.** With `direct` and `mp4` the renderer seeks natively. With `adts` and `mp3`, upnpTube restarts the stream from the new position, so a seek takes a second or two longer.
 
 ## What changed in v2
 
@@ -101,7 +115,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 - **Own SOAP client:** replaces `upnp-device-client`, which crashed the process on fault responses without `<errorDescription>` and sent a wrong `Content-Length` for non-ASCII (accented) metadata.
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
-- **MP3 transcoding** when a renderer doesn't support the source format, with seeking (the stream is restarted at the new offset).
+- **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
 - **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.

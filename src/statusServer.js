@@ -25,7 +25,7 @@ function page(list) {
     <tr>
       <td><b>${esc(r.name)}</b><br><small>${esc(r.device)} · ${esc(r.address)}</small></td>
       <td>${esc(r.receiver)}${r.senders.length ? `<br><small>${esc(r.senders.join(', '))}</small>` : ''}</td>
-      <td>${r.nowPlaying ? `${esc(r.nowPlaying.title)}<br><small>${esc(r.nowPlaying.artist)}</small>` : '–'}
+      <td>${r.nowPlaying ? `${esc(r.nowPlaying.title)}<br><small>${esc(r.nowPlaying.artist)} · ${esc(r.nowPlaying.format)}</small>` : '–'}
           ${r.lastError ? `<br><small class="err">${esc(r.lastError)}</small>` : ''}</td>
       <td><button data-id="${esc(r.id)}">TV code</button><span class="code"></span></td>
     </tr>`).join('');

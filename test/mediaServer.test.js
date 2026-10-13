@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { MediaServer } from '../src/mediaServer.js';
 import { Logger } from '../src/logger.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 test('proxies with Range, DLNA headers, and re-resolves on 403', async (t) => {
   const payload = Buffer.from('0123456789abcdef');
@@ -26,13 +29,13 @@ test('proxies with Range, DLNA headers, and re-resolves on 403', async (t) => {
     resolve: async () => ({ url: resolves++ === 0 ? `${base}/expired` : `${base}/ok`, mime: 'audio/mp4', headers: {} }),
     invalidate: () => {},
   };
-  const ms = new MediaServer({ mediaPort: 0 }, resolver, new Logger('none'));
+  const ms = new MediaServer({ mediaPort: 0, cacheDir: mkdtempSync(path.join(tmpdir(), 'ut-')) }, resolver, new Logger('none'));
   await ms.start();
   t.after(() => { ms.stop(); upstream.close(); });
-  const path = ms.register({ videoId: 'dQw4w9WgXcQ', transcode: false, ext: 'm4a' });
-  assert.match(path, /^\/stream\/[0-9a-f]{32}\.m4a$/);
+  const streamPath = ms.register({ videoId: 'dQw4w9WgXcQ', format: 'direct', ext: 'm4a' });
+  assert.match(streamPath, /^\/stream\/[0-9a-f]{32}\.m4a$/);
 
-  const res = await fetch(`http://127.0.0.1:${ms.port}${path}`, { headers: { Range: 'bytes=2-5' } });
+  const res = await fetch(`http://127.0.0.1:${ms.port}${streamPath}`, { headers: { Range: 'bytes=2-5' } });
   assert.equal(res.status, 206);
   assert.equal(await res.text(), '2345');
   assert.equal(res.headers.get('content-type'), 'audio/mp4');

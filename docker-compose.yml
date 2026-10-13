@@ -12,7 +12,7 @@ services:
       LOG_LEVEL: info
       # ADVERTISE_IP: 192.168.1.10       # pin if auto-detection picks the wrong NIC
       # RENDERER_EXCLUDE: "Samsung|LG"    # e.g. TVs that already have a native YouTube app
-      # TRANSCODE: auto                   # auto | always | never
+      # OUTPUT_FORMAT: auto               # auto | direct | mp4 | adts | mp3
       # STATUS_PORT: 8080                 # 0 disables the status page
 
 volumes:

@@ -7,6 +7,7 @@
 // We parse the description ourselves and pre-seed the client's cache with it.
 
 import et from 'elementtree';
+import { MIME_ALIASES } from './formats.js';
 
 const MEDIA_RENDERER = /urn:schemas-upnp-org:device:MediaRenderer:\d/;
 
@@ -98,10 +99,9 @@ export function buildDidl({ url, protocolInfo, title, artist, album, albumArt, d
 export function sinkAccepts(protocols, mime) {
   if (!protocols?.length) return null;
   const [type] = mime.split('/');
+  const names = [mime, ...(MIME_ALIASES[mime] ?? [])];
   return protocols.some((p) => {
     const cf = (p.contentFormat ?? '').toLowerCase();
-    return p.protocol === 'http-get' && (cf === '*' || cf === mime || cf === `${type}/*`
-      // Common aliases renderers advertise for AAC-in-MP4
-      || (mime === 'audio/mp4' && ['audio/m4a', 'audio/x-m4a', 'audio/aac', 'audio/mp4a-latm'].includes(cf)));
+    return p.protocol === 'http-get' && (cf === '*' || cf === `${type}/*` || names.includes(cf));
   });
 }

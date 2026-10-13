@@ -29,6 +29,7 @@ test:
     key: { files: [package-lock.json] }
     paths: [.npm/]
   script:
+    - apk add --no-cache ffmpeg   # for the real remux/transcode tests
     - npm ci --cache .npm --prefer-offline
     - npm run lint
     - npm test
