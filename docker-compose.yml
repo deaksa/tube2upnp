@@ -1,19 +1,28 @@
+# Settings come from a .env file next to this one (copy .env.example), so local
+# changes never conflict with updates to this file. Every variable is optional.
 services:
   upnptube:
     container_name: upnptube
     build: .
-    image: upnptube:latest
+    # Or use the published image instead of building: comment out "build" and set
+    # UPNPTUBE_IMAGE=ghcr.io/<you>/upnptube:latest in .env
+    image: ${UPNPTUBE_IMAGE:-upnptube:latest}
     # Host networking is required: SSDP/DIAL use multicast on the LAN.
     network_mode: host
     restart: unless-stopped
     volumes:
       - upnptube-data:/data
     environment:
-      LOG_LEVEL: info
-      # ADVERTISE_IP: 192.168.1.10       # pin if auto-detection picks the wrong NIC
-      # RENDERER_EXCLUDE: "Samsung|LG"    # e.g. TVs that already have a native YouTube app
-      # OUTPUT_FORMAT: auto               # auto | direct | mp4 | adts | mp3
-      # STATUS_PORT: 8080                 # 0 disables the status page
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OUTPUT_FORMAT: ${OUTPUT_FORMAT:-auto}   # auto | direct | mp4 | adts | mp3
+      CACHE_MB: ${CACHE_MB:-512}              # disk cache for mp4 downloads/remuxes
+      MP3_BITRATE: ${MP3_BITRATE:-192k}
+      ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
+      RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
+      RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app
+      STATUS_PORT: ${STATUS_PORT:-8080}       # 0 disables the status page
+      MEDIA_PORT: ${MEDIA_PORT:-8000}
+      RECEIVER_BASE_PORT: ${RECEIVER_BASE_PORT:-3000}
 
 volumes:
   upnptube-data:

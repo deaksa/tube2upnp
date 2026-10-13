@@ -35,9 +35,12 @@ The renderer gets a short `http://<host>:8000/stream/<random>.m4a` URL. upnpTube
 
 ```sh
 git clone <your-fork-url> upnpTube && cd upnpTube
+cp .env.example .env        # optional: your settings live here, not in docker-compose.yml
 docker compose up -d --build
 docker compose logs -f
 ```
+
+Instead of building locally, you can use the image that CI publishes to GitHub Container Registry. Set `UPNPTUBE_IMAGE=ghcr.io/<owner>/upnptube:latest` in `.env`, remove `build: .` from the compose file, and run `docker compose pull && docker compose up -d`.
 
 Then open the YouTube app, tap Cast, and pick one of the "🔊 …" devices. The status page is at `http://<host>:8080/`.
 
@@ -66,6 +69,8 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 
 ## Configuration (environment variables)
 
+With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common ones through. When running without Docker, set them as normal environment variables.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` |
@@ -76,7 +81,8 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
-| `CACHE_DIR` / `CACHE_MB` | temp dir / `512` | Where remuxed MP4 files are kept, and the size cap |
+| `CACHE_MB` | `512` | Size cap for the `mp4` disk cache (downloaded and remuxed tracks), oldest evicted first. It's cleared on restart. |
+| `CACHE_DIR` | temp dir | Where that cache lives |
 | `MP3_BITRATE` | `192k` | Bitrate used when transcoding |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |
 | `YTDLP_JS_RUNTIME` | `node` | Passed to `--js-runtimes`. Empty disables it. |
@@ -121,7 +127,15 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. upnpTube passes
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page** with a JSON API (`/api/renderers`), pairing codes and `/healthz`.
-- **Packaging:** Node 22 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitLab CI with SAST, secret detection, dependency scanning and container scanning.
+- **Packaging:** Node 22 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
+
+## CI (GitHub Actions)
+
+- **`CI` workflow:** lint and tests (with ffmpeg) plus `npm audit`. It then builds `linux/amd64` and `linux/arm64` images with SBOM and provenance, and pushes them to `ghcr.io/<owner>/<repo>`. Tags: `latest` on `main`, `X.Y.Z`/`X.Y` for `vX.Y.Z` tags, plus `sha-…`. Finally, Trivy scans the pushed image and uploads the results to the Security tab. It runs weekly too, so the image picks up new yt-dlp releases.
+- **`CodeQL` workflow:** static analysis of the JavaScript and the workflow files.
+- **Dependabot:** weekly updates for npm packages, GitHub Actions (pinned to commit SHAs) and the Docker base image.
+- **Repository settings to enable:** Settings → Code security → Secret scanning and Push protection, plus Dependabot alerts.
+- **GHCR visibility:** published packages are private by default. Make the package public under the repo's Packages settings if you want to pull without logging in.
 
 ## Development
 

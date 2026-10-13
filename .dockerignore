@@ -3,3 +3,5 @@ data
 .git
 test
 README.md
+.env
+.github
