@@ -203,14 +203,6 @@ GPL-3.0-only, the same as the original project. See [LICENSE.md](LICENSE.md).
 
 Tube2U[PnP] is not affiliated with or endorsed by Google or YouTube.
 
-## Upgrading from upnpTube
+## How this fork was built
 
-- The service, container, image and data volume are now named `tube2upnp`. To keep your data, copy the old volume once:
-  ```sh
-  sudo docker compose down        # in the old upnpTube folder
-  sudo docker volume create tube2upnp-data
-  sudo docker run --rm -v upnptube_upnptube-data:/from -v tube2upnp-data:/to alpine cp -a /from/. /to/
-  ```
-  Your data is the phones' pairing with each speaker, the detected and chosen formats, and the SponsorBlock settings. Check the old volume's name with `docker volume ls`.
-- The `.env` variable `UPNPTUBE_IMAGE` is now `TUBE2UPNP_IMAGE`. All other settings keep their names.
-- Formats saved per speaker are read from their old location automatically.
+Most of the code since the fork was written with an AI assistant (Anthropic’s Claude), directed by the maintainer, who tested it. It’s covered by automated tests (npm test) and was tested on a Yamaha RX-V4A over DLNA. Not yet tested on real hardware: gapless playback on renderers other than the RX-V4A, SponsorBlock against the live service, and running under WSL. Bug reports with logs (status page → Logs → Download) are very welcome.
