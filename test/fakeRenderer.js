@@ -1,5 +1,5 @@
 // A fake UPnP MediaRenderer that exposes itself as an EMBEDDED device (like Sonos/AVRs)
-// and uses a non-standard serviceId spelling - both broke the original upnpTube.
+// and uses a non-standard serviceId spelling - both broke the original upnpTube (which this project forked).
 import http from 'node:http';
 
 const ACTIONS = {

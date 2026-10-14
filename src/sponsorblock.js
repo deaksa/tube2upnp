@@ -1,5 +1,5 @@
 // SponsorBlock: community-submitted segments (non-music parts of music videos,
-// sponsor reads, intros...) that upnpTube skips by seeking past them.
+// sponsor reads, intros...) that Tube2U[PnP] skips by seeking past them.
 //
 // Privacy: we query by the first 4 hex chars of SHA-256(videoId), so the server
 // never learns which video is playing (k-anonymity API), and filter locally.
@@ -58,7 +58,7 @@ export class SponsorBlock {
     let segments = [];
     const started = Date.now();
     try {
-      const res = await this.fetch(url, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'upnpTube' } });
+      const res = await this.fetch(url, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'tube2upnp' } });
       if (res.status !== 404) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const list = await res.json();

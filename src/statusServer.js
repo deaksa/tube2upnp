@@ -46,7 +46,7 @@ function tokenOk(config, req, url) {
  * preflight, which we never approve) and, if the browser sends Origin, our own host.
  */
 function csrfOk(req) {
-  if (req.headers['x-upnptube'] !== '1') return false;
+  if (req.headers['x-tube2upnp'] !== '1') return false;
   const origin = req.headers.origin;
   return !origin || origin === `http://${req.headers.host}`;
 }

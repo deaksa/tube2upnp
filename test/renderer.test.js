@@ -17,7 +17,7 @@ class FakeReceiver extends EventEmitter {
   getConnectedSenders() { return []; }
 }
 
-function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-')), extraDeps = {}) {
+function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'tube2upnp-')), extraDeps = {}) {
   let receiverOpts;
   const registered = [];
   const resolves = [];
@@ -139,7 +139,7 @@ test('renderer errors without UPnP fault body do not crash, and UTF-8 bodies hav
 test('walks the format chain when the renderer never starts, and remembers the winner', async (t) => {
   const fake = await startFakeRenderer({ neverPlay: true });
   t.after(() => fake.server.close());
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-'));
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'tube2upnp-'));
   const { r, registered } = setup(fake, {}, dataDir);
   await r.init();
   r.setLogger(new Logger('none'));
@@ -274,7 +274,7 @@ test('queue change replaces the prepared next track', async (t) => {
 test('per-renderer format override wins over the global setting and is persisted', async (t) => {
   const fake = await startFakeRenderer();
   t.after(() => fake.server.close());
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'upnptube-'));
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'tube2upnp-'));
   const { r, registered } = setup(fake, { outputFormat: 'mp4' }, dataDir);
   await r.init();
   await r.setFormatOverride('flac');

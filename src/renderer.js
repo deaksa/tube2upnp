@@ -133,12 +133,12 @@ export class Renderer extends Player {
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
     this.#store = new RendererDataStore(this.cfg.dataDir, this.udn);
-    const learned = await this.#store.get('upnptube.format');
+    const learned = await this.#setting('format');
     if (FORMATS[learned]) {
       this.#learnedFormat = learned;
       this.log.info(`Using previously detected stream format "${learned}"`);
     }
-    const override = await this.#store.get('upnptube.formatOverride');
+    const override = await this.#setting('formatOverride');
     if (override === 'auto' || FORMATS[override]) {
       this.#formatOverride = override;
       this.log.info(`Stream format set to "${override}" for this renderer`);
@@ -151,7 +151,7 @@ export class Renderer extends Player {
       device: {
         name: this.name,
         screenName: this.name,
-        brand: desc.manufacturer || 'upnpTube',
+        brand: desc.manufacturer || 'Tube2U[PnP]',
         model: desc.modelName || 'UPnP Renderer',
       },
       dataStore: this.#store,
@@ -181,6 +181,12 @@ export class Renderer extends Player {
       this.log.warn('Error stopping receiver:', err.message);
     }
     this.#receiver = null;
+  }
+
+  /** Read a persisted per-renderer value, falling back to its key from before the rename. */
+  async #setting(name) {
+    const v = await this.#store.get(`tube2upnp.${name}`);
+    return v ?? this.#store.get(`upnptube.${name}`);
   }
 
   /** Fetch a pairing code for "Link with TV code" (resolves with the code). */
@@ -456,7 +462,7 @@ export class Renderer extends Player {
     const f = this.#current?.format;
     if (!f || this.formatMode !== 'auto' || this.#learnedFormat === f) return;
     this.#learnedFormat = f;
-    await this.#store?.set('upnptube.format', f);
+    await this.#store?.set('tube2upnp.format', f);
     this.log.info(`Stream format "${f}" works on this renderer - remembered`);
   }
 
@@ -545,7 +551,7 @@ export class Renderer extends Player {
   async setFormatOverride(value) {
     if (value !== null && value !== 'auto' && !FORMATS[value]) throw new Error(`Unknown format "${value}"`);
     this.#formatOverride = value;
-    await this.#store?.set('upnptube.formatOverride', value);
+    await this.#store?.set('tube2upnp.formatOverride', value);
     this.log.info(value ? `Stream format set to "${value}" for this renderer` : 'Stream format follows the global setting again');
     this.#queued = null; // prepared next track may be in the old format
     const c = this.#current;
@@ -557,7 +563,8 @@ export class Renderer extends Player {
 
   async forgetLearnedFormat() {
     this.#learnedFormat = null;
-    await this.#store?.set('upnptube.format', null);
+    await this.#store?.set('tube2upnp.format', null);
+    await this.#store?.set('upnptube.format', null); // pre-rename key
     this.log.info('Forgot the detected stream format - it will be detected again on the next track');
   }
 

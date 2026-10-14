@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>upnpTube</title>
+<title>Tube2U[PnP]</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f2426'/%3E%3Cpath d='M12 9v14l11-7z' fill='%23ffb547'/%3E%3C/svg%3E">
 <style>
   /* Brushed-aluminium faceplate with a smoked-glass display window. */
@@ -53,6 +53,8 @@
     border-bottom: 1px solid var(--plate-edge);
   }
   .brand { font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; margin: 0; }
+  .brand .pnp { color: var(--vfd); font-weight: 500; margin-left: .05em; }
+  @media (prefers-color-scheme: light) { .brand .pnp { color: #b8741a; } }
   .brand small { font-size: .8rem; font-weight: 400; color: var(--muted); margin-left: .5rem; letter-spacing: 0; }
   nav { display: flex; gap: .4rem; margin-left: auto; overflow-x: auto; max-width: 100%; }
   nav button {
@@ -194,7 +196,7 @@
 </head>
 <body>
 <header>
-  <h1 class="brand">upnpTube<small id="appver"></small></h1>
+  <h1 class="brand">Tube2U<span class="pnp">[PnP]</span><small id="appver"></small></h1>
   <nav role="tablist" aria-label="Views">
     <button role="tab" aria-selected="true" data-view="speakers">Speakers</button>
     <button role="tab" aria-selected="false" data-view="logs">Logs</button>
@@ -234,8 +236,8 @@ const authHeaders = token ? { Authorization: 'Bearer ' + token } : {};
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
-    headers: { ...authHeaders, ...(opts.body ? { 'Content-Type': 'application/json', 'X-Upnptube': '1' } : {}),
-      ...(opts.method === 'POST' ? { 'X-Upnptube': '1' } : {}) },
+    headers: { ...authHeaders, ...(opts.body ? { 'Content-Type': 'application/json', 'X-Tube2upnp': '1' } : {}),
+      ...(opts.method === 'POST' ? { 'X-Tube2upnp': '1' } : {}) },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || 'Request failed (HTTP ' + res.status + ')');
@@ -308,7 +310,7 @@ function renderSpeakers(app) {
   if (!speakerData.length) {
     root.append(h('div', { class: 'empty' },
       h('p', {}, 'No speakers found yet.'),
-      h('p', { class: 'hint' }, 'upnpTube looks for DLNA/UPnP renderers on startup and every few minutes. '
+      h('p', { class: 'hint' }, 'Tube2U[PnP] looks for DLNA/UPnP renderers on startup and every few minutes. '
         + 'If yours is missing, check that this machine is on the same network and that UDP port 1900 is not blocked.')));
     return;
   }
@@ -415,7 +417,7 @@ function lineEl(l) {
   return h('span', { class: 'l lv-' + l.level },
     h('span', { class: 't' }, t.toLocaleTimeString([], { hour12: false }) + '.' + String(t.getMilliseconds()).padStart(3, '0') + ' '),
     l.level === 'info' ? '' : l.level.toUpperCase() + ' ',
-    h('span', { class: 'p' }, l.prefix.replace('[upnpTube] ', '').replace('[upnpTube]', '')), ' ', l.text);
+    h('span', { class: 'p' }, l.prefix.replace('[tube2upnp] ', '').replace('[tube2upnp]', '')), ' ', l.text);
 }
 function redrawLogs() {
   logEl.replaceChildren(...lines.filter(lineVisible).map(lineEl));
@@ -455,7 +457,7 @@ logEl.addEventListener('wheel', () => { if (logEl.scrollTop + logEl.clientHeight
   follow = false; document.getElementById('follow').setAttribute('aria-pressed', 'false'); } }, { passive: true });
 document.getElementById('dllog').addEventListener('click', () => {
   const text = lines.filter(lineVisible).map((l) => new Date(l.ts).toISOString() + ' ' + l.level.toUpperCase().padEnd(5) + ' ' + l.prefix + ' ' + l.text).join('\n');
-  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: 'upnptube-' + new Date().toISOString().slice(0, 19).replace(/:/g, '') + '.log' });
+  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: 'tube2upnp-' + new Date().toISOString().slice(0, 19).replace(/:/g, '') + '.log' });
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
 
@@ -489,7 +491,7 @@ async function refreshStats() {
         panel('This box',
           spark('CPU (% of one core)', hist.map((x) => x.cpu), (v) => v + ' %'),
           spark('Memory (RSS)', hist.map((x) => x.rss), fmtBytes),
-          dl([['Uptime', fmtDur(s.uptimeS)], ['upnpTube', 'v' + s.info.version], ['Node.js', s.info.node],
+          dl([['Uptime', fmtDur(s.uptimeS)], ['Tube2U[PnP]', 'v' + s.info.version], ['Node.js', s.info.node],
             ['yt-dlp', s.info.ytdlp || 'not found'], ['ffmpeg', s.info.ffmpeg || 'not found'],
             ['Host', s.info.host], ['System', s.info.platform], ['CPU', s.info.cpus],
             ['Load (1/5/15 min)', s.info.loadavg.join(' / ')], ['Heap used', fmtBytes(s.memory.heapUsed)]])),
@@ -549,7 +551,7 @@ async function refreshSettings() {
         h('span', {}, label, ' ', h('small', {}, key))));
     document.getElementById('settings').replaceChildren(h('div', { class: 'settings' },
       h('h2', {}, 'SponsorBlock'),
-      h('p', {}, 'Skips parts of videos that the SponsorBlock community has marked, such as the talking before a music video starts or a sponsor read. upnpTube seeks past them while the track plays.'),
+      h('p', {}, 'Skips parts of videos that the SponsorBlock community has marked, such as the talking before a music video starts or a sponsor read. Tube2U[PnP] seeks past them while the track plays.'),
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', role: 'switch', checked: sb.enabled, 'data-key': 'sb-enabled', onchange: (e) =>
           save({ enabled: e.target.checked }, e.target.checked ? 'SponsorBlock turned on' : 'SponsorBlock turned off') }),

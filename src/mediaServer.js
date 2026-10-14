@@ -44,7 +44,7 @@ export class MediaServer {
     this.log = logger;
     this.download = opts.download
       ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
-    this.cacheDir = config.cacheDir ?? path.join(os.tmpdir(), 'upnptube-cache');
+    this.cacheDir = config.cacheDir ?? path.join(os.tmpdir(), 'tube2upnp-cache');
   }
 
   async start() {

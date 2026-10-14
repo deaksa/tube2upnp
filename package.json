@@ -1,11 +1,11 @@
 {
-  "name": "upnptube",
-  "version": "2.10.0",
-  "description": "Cast from the YouTube / YouTube Music apps to DLNA/UPnP renderers",
+  "name": "tube2upnp",
+  "version": "3.0.0",
+  "description": "Tube2U[PnP]: cast from the YouTube / YouTube Music apps to DLNA/UPnP renderers (a fork of upnpTube)",
   "type": "module",
   "main": "src/index.js",
   "bin": {
-    "upnpTube": "src/index.js"
+    "tube2upnp": "src/index.js"
   },
   "engines": {
     "node": ">=20"
@@ -16,15 +16,17 @@
     "lint": "eslint src test"
   },
   "keywords": [
-    "youtube",
-    "youtube-music",
-    "dlna",
-    "upnp",
-    "cast",
     "audio",
-    "music"
+    "cast",
+    "dlna",
+    "music",
+    "sponsorblock",
+    "upnp",
+    "upnptube",
+    "youtube",
+    "youtube-music"
   ],
-  "author": "Mark Smith (original), upnpTube contributors",
+  "author": "Mark Smith (original upnpTube), Tube2U[PnP] contributors",
   "license": "GPL-3.0-only",
   "dependencies": {
     "elementtree": "^0.1.7",

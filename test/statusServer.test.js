@@ -51,12 +51,12 @@ test('format changes require the CSRF header and same origin', async (t) => {
   const { base, r } = await start(t);
   assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' })).status, 403);
   assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' },
-    { 'X-Upnptube': '1', Origin: 'http://evil.example' })).status, 403);
-  assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' }, { 'X-Upnptube': '1' })).status, 200);
-  assert.equal((await post(base + '/api/renderers/r1/format', { format: null }, { 'X-Upnptube': '1' })).status, 200);
-  assert.equal((await post(base + '/api/renderers/r1/forget-format', {}, { 'X-Upnptube': '1' })).status, 200);
+    { 'X-Tube2upnp': '1', Origin: 'http://evil.example' })).status, 403);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: 'flac' }, { 'X-Tube2upnp': '1' })).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/format', { format: null }, { 'X-Tube2upnp': '1' })).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/forget-format', {}, { 'X-Tube2upnp': '1' })).status, 200);
   assert.deepEqual(r.calls, [['format', 'flac'], ['format', null], ['forget']]);
-  assert.equal((await post(base + '/api/renderers/nope/format', {}, { 'X-Upnptube': '1' })).status, 404);
+  assert.equal((await post(base + '/api/renderers/nope/format', {}, { 'X-Tube2upnp': '1' })).status, 404);
 });
 
 test('STATUS_TOKEN protects the API (header or query), not the page or health check', async (t) => {
@@ -94,10 +94,10 @@ test('SponsorBlock settings: read, change (validated, CSRF-protected), reset', a
   const get = async () => (await (await fetch(base + '/api/settings')).json()).sponsorblock;
   assert.equal((await get()).enabled, false);
   assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: true })).status, 403);
-  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: 'yes' }, { 'X-Upnptube': '1' })).status, 400);
-  assert.equal((await post(base + '/api/settings/sponsorblock', { categories: ['bogus'] }, { 'X-Upnptube': '1' })).status, 400);
-  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: true, categories: ['music_offtopic'] }, { 'X-Upnptube': '1' })).status, 200);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: 'yes' }, { 'X-Tube2upnp': '1' })).status, 400);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { categories: ['bogus'] }, { 'X-Tube2upnp': '1' })).status, 400);
+  assert.equal((await post(base + '/api/settings/sponsorblock', { enabled: true, categories: ['music_offtopic'] }, { 'X-Tube2upnp': '1' })).status, 200);
   assert.deepEqual(settings.sponsorblock, { enabled: true, categories: ['music_offtopic'], fromEnv: false });
-  assert.equal((await post(base + '/api/settings/sponsorblock/reset', {}, { 'X-Upnptube': '1' })).status, 200);
+  assert.equal((await post(base + '/api/settings/sponsorblock/reset', {}, { 'X-Tube2upnp': '1' })).status, 200);
   assert.equal((await get()).enabled, false);
 });

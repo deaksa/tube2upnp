@@ -16,7 +16,7 @@ import { startStatusServer } from './statusServer.js';
 const RENDERER_ST = 'urn:schemas-upnp-org:device:MediaRenderer:1';
 const RETRY_FAILED_MS = 5 * 60 * 1000;
 
-const log = new Logger(config.logLevel, '[upnpTube]');
+const log = new Logger(config.logLevel, '[tube2upnp]');
 const resolver = new Resolver(config, log.child('[yt-dlp]'));
 const mediaServer = new MediaServer(config, resolver, log.child('[media]'));
 const ssdp = new Ssdp(log.child('[ssdp]'));
@@ -144,7 +144,7 @@ async function main() {
   if (unknown.length) log.warn(`Unknown SPONSORBLOCK_CATEGORIES ignored by SponsorBlock: ${unknown.join(', ')}`);
   const sb = settings.sponsorblock;
   log.info(`SponsorBlock ${sb.enabled ? `on (${sb.categories.join(', ')})` : 'off'}${sb.fromEnv ? '' : ' - set on the status page'}`);
-  log.info('Starting upnpTube');
+  log.info('Starting Tube2U[PnP] (a fork of upnpTube)');
   await checkTools();
   stats.startSampling();
   scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
