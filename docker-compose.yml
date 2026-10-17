@@ -1,0 +1,34 @@
+# Settings come from a .env file next to this one (copy .env.example), so local
+# changes never conflict with updates to this file. Every variable is optional.
+services:
+  tube2upnp:
+    container_name: tube2upnp
+    build: .
+    # Or use the published image instead of building: comment out "build" and set
+    # TUBE2UPNP_IMAGE=ghcr.io/<you>/tube2upnp:latest in .env
+    image: ${TUBE2UPNP_IMAGE:-tube2upnp:latest}
+    # Host networking is required: SSDP/DIAL use multicast on the LAN.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - tube2upnp-data:/data
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OUTPUT_FORMAT: ${OUTPUT_FORMAT:-auto}   # auto | direct | mp4 | adts | flac | mp3
+      CACHE_MB: ${CACHE_MB:-512}              # disk cache for mp4 downloads/remuxes
+      MP3_BITRATE: ${MP3_BITRATE:-192k}
+      FLAC_BITS: ${FLAC_BITS:-16}             # 16 | 24
+      PREFETCH: ${PREFETCH:-true}             # prepare the next track in advance
+      GAPLESS: ${GAPLESS:-true}               # hand it to the renderer (SetNextAVTransportURI)
+      SPONSORBLOCK: ${SPONSORBLOCK:-false}    # skip SponsorBlock segments (status page can override)
+      SPONSORBLOCK_CATEGORIES: ${SPONSORBLOCK_CATEGORIES:-music_offtopic,sponsor,selfpromo,interaction}
+      ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
+      RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
+      RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app
+      STATUS_PORT: ${STATUS_PORT:-8080}       # 0 disables the status page
+      STATUS_TOKEN: ${STATUS_TOKEN:-}         # optional: require ?token=… on the status page
+      MEDIA_PORT: ${MEDIA_PORT:-8000}
+      RECEIVER_BASE_PORT: ${RECEIVER_BASE_PORT:-3000}
+
+volumes:
+  tube2upnp-data:
