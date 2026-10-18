@@ -293,6 +293,23 @@ test('a next track that cannot be prepared is not retried on every poll', async 
   await r.destroy();
 });
 
+test('a renderer removed while a track is loading stays stopped', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => { await wait(200); return resolve(id); }; // slow yt-dlp
+  await r.init();
+  const play = r.doPlay({ id: A }, 0);
+  await wait(50);
+  await r.destroy(); // device went away (byebye / stale) mid-load
+  assert.equal(await play, false);
+  const calls = fake.calls.length;
+  await wait(300);
+  assert.equal(fake.calls.length, calls, 'no SOAP calls (polls, Play) after destroy');
+  assert.ok(!fake.calls.some((c) => c.action === 'SetAVTransportURI'));
+});
+
 test('per-renderer format override wins over the global setting and is persisted', async (t) => {
   const fake = await startFakeRenderer();
   t.after(() => fake.server.close());

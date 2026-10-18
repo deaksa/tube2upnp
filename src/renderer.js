@@ -38,6 +38,7 @@ export class Renderer extends Player {
   #prefetchFailures = new Map(); // videoId -> { count, until }
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
+  #destroyed = false;
 
   /**
    * @param {object} p
@@ -179,6 +180,12 @@ export class Renderer extends Player {
   }
 
   async destroy() {
+    // A load, prefetch or poll still in flight must not bring polling back afterwards.
+    this.#destroyed = true;
+    this.#loadSeq++;
+    this.#current = null;
+    this.#queued = null;
+    this.#advanced = null;
     this.#stopPolling();
     this.#resetSkips();
     try {
@@ -211,6 +218,7 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
+    if (this.#destroyed) return false;
     const adv = this.#advanced;
     this.#advanced = null;
     if (adv && adv.video.id === video.id && position < 2) {
@@ -251,7 +259,9 @@ export class Renderer extends Player {
 
       if (position > 1 && !item.current.startAt) {
         await this.#waitForState(['PLAYING'], 8000);
+        if (seq !== this.#loadSeq) return false;
         await this.#safeCall('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
+        if (seq !== this.#loadSeq) return false;
       }
 
       this.#adopt(item, false);
@@ -405,6 +415,7 @@ export class Renderer extends Player {
     try {
       const item = await this.#prepareItem(up, 0);
       this.#prefetchFailures.delete(up.id);
+      if (this.#destroyed) return;
       // Queue or current track changed while we were preparing? Try again next poll.
       if (this.getUpcomingVideo()?.id !== up.id || this.#current?.video.id !== currentId) return;
       this.#queued = { video: up, item, sentToRenderer: false };
@@ -681,6 +692,7 @@ export class Renderer extends Player {
   // subscriptions, and eventing needs an inbound callback port through NAT/firewalls.
   #startPolling() {
     this.#stopPolling();
+    if (this.#destroyed) return;
     this.#pollTimer = setInterval(() => {
       if (this.#polling) return; // a slow renderer must not stack up overlapping polls
       this.#polling = true;
@@ -698,7 +710,7 @@ export class Renderer extends Player {
     if (this.#expectStop) return;
     this.#polls++;
     const state = await this.#transportState();
-    if (!state) return;
+    if (!state || this.#destroyed) return;
     this.#transport = state;
     if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
       const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
@@ -718,6 +730,7 @@ export class Renderer extends Player {
         };
       }
     }
+    if (this.#destroyed) return;
 
     // If the renderer hasn't reached PLAYING well after Play, assume it can't handle
     // the stream (typically YouTube's fragmented DASH M4A) and retry as MP3.
