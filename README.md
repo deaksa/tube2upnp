@@ -101,7 +101,7 @@ The page only answers when it's opened by IP address, as `localhost`, or by this
 
 ## Running without Docker
 
-You need Node.js 20 or later (22 recommended), yt-dlp, and optionally ffmpeg.
+You need Node.js 22 or later (24 recommended), yt-dlp, and optionally ffmpeg.
 
 ```sh
 pip install -U "yt-dlp[default]"   # [default] pulls in yt-dlp-ejs, needed for YouTube
@@ -191,7 +191,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page:** now playing, per-speaker format setting, live logs, stats for nerds, pairing codes. JSON API and `/healthz`, optional token, CSRF protection.
-- **Packaging:** Node 22 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
+- **Packaging:** Node 24 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
 
 ## CI (GitHub Actions)
 

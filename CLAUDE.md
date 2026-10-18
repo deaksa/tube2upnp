@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Tube2U[PnP] (package `tube2upnp`): a Node.js (ESM, Node ≥20, CI uses 22) service that discovers UPnP/DLNA MediaRenderers on the LAN and exposes each one as a YouTube cast receiver (via `yt-cast-receiver` 2.x). yt-dlp resolves video IDs; ffmpeg remuxes/transcodes. Fork of upnpTube; the README is the user-facing spec for behaviour and all env vars.
+Tube2U[PnP] (package `tube2upnp`): a Node.js (ESM, Node ≥22, CI and Docker use 24) service that discovers UPnP/DLNA MediaRenderers on the LAN and exposes each one as a YouTube cast receiver (via `yt-cast-receiver` 2.x). yt-dlp resolves video IDs; ffmpeg remuxes/transcodes. Fork of upnpTube; the README is the user-facing spec for behaviour and all env vars.
 
 ## Commands
 
