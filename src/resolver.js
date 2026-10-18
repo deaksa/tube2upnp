@@ -162,7 +162,12 @@ export async function downloadWithYtdlp(config, _logger, videoId, info, dest) {
     ? ['--load-info-json', jsonFile, '-f', fmt, ...common]
     : ['-f', config.ytdlpFormat, ...common, '--', `https://www.youtube.com/watch?v=${videoId}`];
   try {
-    if (info.rawJson) await writeFile(jsonFile, info.rawJson);
+    if (info.rawJson) {
+      // Only we may read it, and never write through something already there (a leftover,
+      // or a symlink planted in a CACHE_DIR others can write to).
+      await rm(jsonFile, { force: true });
+      await writeFile(jsonFile, info.rawJson, { mode: 0o600, flag: 'wx' });
+    }
     await run(args);
   } catch (err) {
     const e = new Error(`yt-dlp download failed for ${videoId}: ${tail(err)}`);

@@ -22,6 +22,9 @@ services:
       GAPLESS: ${GAPLESS:-true}               # hand it to the renderer (SetNextAVTransportURI)
       SPONSORBLOCK: ${SPONSORBLOCK:-false}    # skip SponsorBlock segments (status page can override)
       SPONSORBLOCK_CATEGORIES: ${SPONSORBLOCK_CATEGORIES:-music_offtopic,sponsor,selfpromo,interaction}
+      HISTORY: ${HISTORY:-true}               # playback history on the status page
+      HISTORY_MAX: ${HISTORY_MAX:-5000}
+      HISTORY_MIN_PLAY_S: ${HISTORY_MIN_PLAY_S:-30}
       ADVERTISE_IP: ${ADVERTISE_IP:-}         # pin if auto-detection picks the wrong NIC
       RENDERER_INCLUDE: ${RENDERER_INCLUDE:-}
       RENDERER_EXCLUDE: ${RENDERER_EXCLUDE:-} # e.g. TVs that already have a native YouTube app

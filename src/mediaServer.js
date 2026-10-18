@@ -7,7 +7,6 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -16,6 +15,7 @@ import { downloadWithYtdlp } from './resolver.js';
 import { stats } from './stats.js';
 
 const MAX_TOKENS = 256;
+const CACHE_FILE = /\.(m4a|flac|source)$/;
 const PASSTHROUGH_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
 
 export function parseRange(header, size) {
@@ -34,7 +34,6 @@ export class MediaServer {
   #remuxJobs = new Map();    // `${videoId}-${format}-${startAt}` -> Promise<file path>
   #downloadJobs = new Map(); // videoId -> Promise<source path>
   #pins = new Map();         // cache file name -> number of downloads/builds/responses using it
-  #lastUsed = new Map();     // cache file name -> ms, for least-recently-used eviction
 
   /**
    * @param {object} [opts]
@@ -46,12 +45,24 @@ export class MediaServer {
     this.log = logger;
     this.download = opts.download
       ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
-    this.cacheDir = config.cacheDir ?? path.join(os.tmpdir(), 'tube2upnp-cache');
+    // Default: under DATA_DIR, so the cache survives restarts (and the Docker data volume
+    // keeps it). Never the shared temp folder: other local users could read or pre-create
+    // files at a predictable path there.
+    this.cacheDir = config.cacheDir ?? path.join(config.dataDir ?? './data', 'cache');
   }
 
   async start() {
-    await fsp.rm(this.cacheDir, { recursive: true, force: true });
-    await fsp.mkdir(this.cacheDir, { recursive: true });
+    await fsp.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
+    // Keep finished files from earlier runs; drop anything a crash or restart left half-written.
+    let kept = 0;
+    let bytes = 0;
+    for (const f of await fsp.readdir(this.cacheDir)) {
+      const full = path.join(this.cacheDir, f);
+      if (/\.(part|download|info\.json)$/.test(f)) await fsp.rm(full, { force: true });
+      else if (CACHE_FILE.test(f)) { kept++; bytes += (await fsp.stat(full)).size; }
+    }
+    if (kept) this.log.info(`Cache: ${kept} file(s), ${(bytes / 1048576).toFixed(0)} MB kept from earlier runs (${this.cacheDir})`);
+    await this.#pruneCache();
     await new Promise((resolve, reject) => {
       this.#server = http.createServer((req, res) => this.#handle(req, res).catch((err) => {
         this.log.error('Stream error:', err.message);
@@ -204,8 +215,8 @@ export class MediaServer {
       }],
       ['the yt-dlp download', async () => this.#fileInputArgs(await this.#existingSourceFile(videoId), startAt)],
     ];
-    // Source already downloaded (e.g. mp4 was tried before): no need to ask YouTube.
-    if (this.#downloadJobs.has(videoId)) attempts.unshift(attempts.pop());
+    // Source already downloaded (mp4 tried before, or an earlier run): no need to ask YouTube.
+    if (this.#downloadJobs.has(videoId) || fs.existsSync(this.#sourcePath(videoId))) attempts.unshift(attempts.pop());
 
     let error;
     for (const [i, [, input]] of attempts.entries()) {
@@ -271,7 +282,7 @@ export class MediaServer {
     let bytes = 0;
     try {
       for (const f of await fsp.readdir(this.cacheDir)) {
-        if (!/\.(m4a|flac|source)$/.test(f)) continue;
+        if (!CACHE_FILE.test(f)) continue;
         files++;
         bytes += (await fsp.stat(path.join(this.cacheDir, f))).size;
       }
@@ -288,11 +299,15 @@ export class MediaServer {
     return this.#once(this.#remuxJobs, key, () => this.#runRemux(entry, key));
   }
 
-  /** Mark a cache file as in use so eviction leaves it alone; returns the release function. */
+  /**
+   * Mark a cache file as in use so eviction leaves it alone, and as recently used (its
+   * mtime: LRU order that survives restarts). Returns the release function.
+   */
   #pin(file) {
     const name = path.basename(file);
     this.#pins.set(name, (this.#pins.get(name) ?? 0) + 1);
-    this.#lastUsed.set(name, Date.now());
+    const now = new Date();
+    fsp.utimes(file, now, now).catch(() => {}); // not there yet / gone: nothing to mark
     let released = false;
     return () => {
       if (released) return;
@@ -312,17 +327,16 @@ export class MediaServer {
     return this.#sourceFile(videoId);
   }
 
+  #sourcePath(videoId) {
+    return path.join(this.cacheDir, `${videoId}.source`);
+  }
+
   #sourceFile(videoId) {
     return this.#once(this.#downloadJobs, videoId, async () => {
-      const dest = path.join(this.cacheDir, `${videoId}.source`);
+      const dest = this.#sourcePath(videoId);
+      if (await this.#reuse(dest)) return dest;
       const started = Date.now();
-      const delays = this.cfg.downloadRetryDelaysMs ?? [2000, 5000];
-      const unpin = this.#pin(dest); // written in place (--no-part): don't evict half a file
-      try {
-        await this.#download(videoId, dest, delays);
-      } finally {
-        unpin();
-      }
+      await this.#download(videoId, dest, this.cfg.downloadRetryDelaysMs ?? [2000, 5000]);
       const { size } = await fsp.stat(dest);
       stats.inc('download.bytes', size);
       this.log.info(`Downloaded ${videoId} (${(size / 1048576).toFixed(1)} MB) in ${Date.now() - started} ms`);
@@ -331,17 +345,23 @@ export class MediaServer {
   }
 
   async #download(videoId, dest, delays) {
+    // Download to a temp name and rename, so an interrupted download is never mistaken for a
+    // complete file after a restart (and is never a cache file that eviction could pick).
+    // Not ".part": yt-dlp strips that suffix from -o names and would write straight to dest.
+    const part = `${dest}.download`;
     for (let attempt = 0; ; attempt++) {
       try {
         const info = await this.resolver.resolve(videoId);
         const t = Date.now();
-        await this.download(videoId, info, dest);
+        await this.download(videoId, info, part);
+        await fsp.rename(part, dest);
         stats.time('download', Date.now() - t);
-        break;
+        return;
       } catch (err) {
         // A 403 on a URL that's seconds old isn't expiry: YouTube handed out a format URL
         // it won't serve (it varies per extraction). Drop it and extract afresh.
         this.resolver.invalidate(videoId);
+        await fsp.rm(part, { force: true });
         if (err.forbidden) stats.inc('download.forbidden');
         if (attempt >= delays.length) {
           stats.inc('download.failed');
@@ -370,8 +390,9 @@ export class MediaServer {
   }
 
   async #runRemux(entry, key) {
-    const src = await this.#existingSourceFile(entry.videoId);
     const file = path.join(this.cacheDir, `${key}.${FORMATS[entry.format].ext}`);
+    if (await this.#reuse(file)) return file;
+    const src = await this.#existingSourceFile(entry.videoId);
     const part = `${file}.part`;
     const started = Date.now();
     const args = [
@@ -397,14 +418,44 @@ export class MediaServer {
     } finally {
       unpinSrc();
     }
-    this.#lastUsed.set(path.basename(file), Date.now());
     stats.time(`build.${entry.format}`, Date.now() - started);
     this.log.info(`${entry.format === 'mp4' ? 'Remuxed' : 'Encoded'} ${entry.videoId}${entry.startAt ? ` @${entry.startAt}s` : ''} to ${entry.format.toUpperCase()} in ${Date.now() - started} ms`);
     // Never evict what was just built (or its source), even if it alone exceeds CACHE_MB:
-    // the renderer is about to fetch it. It becomes evictable once something newer is built.
+    // the renderer is about to fetch it. It becomes evictable once something newer is used.
     this.#pruneCache([path.basename(file), path.basename(src)])
       .catch((err) => this.log.debug('Cache cleanup failed:', err.message));
     return file;
+  }
+
+  /** Use a finished file from the cache (this or an earlier run) and mark it recently used. */
+  async #reuse(file) {
+    try {
+      const st = await fsp.stat(file);
+      if (!st.size) return false;
+      const now = new Date();
+      await fsp.utimes(file, now, now); // LRU by mtime: atime is often not updated (relatime/noatime)
+      stats.inc('cache.diskHits');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Delete every cached file (e.g. after changing YTDLP_FORMAT), except files in use. */
+  async clearCache() {
+    this.#downloadJobs.clear();
+    this.#remuxJobs.clear();
+    let n = 0;
+    let busy = 0;
+    for (const f of await fsp.readdir(this.cacheDir)) {
+      if (!CACHE_FILE.test(f)) continue;
+      // A track being played or built keeps its file; it goes with the next eviction.
+      if (this.#pins.has(f)) { busy++; continue; }
+      await fsp.rm(path.join(this.cacheDir, f), { force: true });
+      n++;
+    }
+    this.log.info(`Cache cleared (${n} file(s)${busy ? `, ${busy} in use kept` : ''})`);
+    return n;
   }
 
   #fileCodecArgs(format) {
@@ -419,12 +470,12 @@ export class MediaServer {
   /** Evict least-recently-used files until the cache fits CACHE_MB, sparing files in use. */
   async #pruneCache(keep = []) {
     const limit = (this.cfg.cacheMb ?? 512) * 1048576;
-    const names = (await fsp.readdir(this.cacheDir)).filter((f) => /\.(m4a|flac|source)$/.test(f));
+    const names = (await fsp.readdir(this.cacheDir)).filter((f) => CACHE_FILE.test(f));
     const files = (await Promise.all(names.map(async (f) => {
       try {
         const st = await fsp.stat(path.join(this.cacheDir, f));
-        // Our own timestamps, not atime: noatime/relatime mounts barely update it.
-        return { f, size: st.size, used: this.#lastUsed.get(f) ?? st.mtimeMs };
+        // mtime, which use updates (#reuse, #pin): atime barely moves on noatime/relatime mounts.
+        return { f, size: st.size, used: st.mtimeMs };
       } catch {
         return null; // removed meanwhile
       }
@@ -436,7 +487,6 @@ export class MediaServer {
       if (keep.includes(x.f) || this.#pins.has(x.f)) continue; // being written, read or just built
       if (x.f.endsWith('.source')) this.#downloadJobs.delete(x.f.slice(0, -'.source'.length));
       else this.#remuxJobs.delete(x.f.replace(/\.\w+$/, ''));
-      this.#lastUsed.delete(x.f);
       await fsp.rm(path.join(this.cacheDir, x.f), { force: true });
       total -= x.size;
       stats.inc('cache.evictions');

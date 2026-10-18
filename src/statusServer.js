@@ -1,5 +1,5 @@
-// LAN status page: renderers, per-renderer stream format, live logs, stats for nerds,
-// and "Link with TV code" pairing codes (which work even when the phone can't see our
+// LAN status page: renderers, per-renderer stream format, live logs, playback history,
+// stats for nerds, and "Link with TV code" pairing codes (which work even when the phone can't see our
 // DIAL/SSDP announcements: other VLAN, guest Wi-Fi, multicast-filtering APs).
 
 import http from 'node:http';
@@ -51,7 +51,7 @@ function csrfOk(req) {
   return !origin || origin === `http://${req.headers.host}`;
 }
 
-export function startStatusServer(config, { renderers, mediaServer, settings }, log) {
+export function startStatusServer(config, { renderers, mediaServer, settings, history = null }, log) {
   const routes = [
     ['GET', /^\/api\/status$/, async () => ({
       app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
@@ -79,6 +79,22 @@ export function startStatusServer(config, { renderers, mediaServer, settings }, 
       log.info('SponsorBlock settings reset to the .env defaults');
       return { ok: true };
     }],
+    ['GET', /^\/api\/history$/, async (_m, url) => ({
+      plays: playHistory().recent({
+        limit: limit(url), before: Number(url.searchParams.get('before')) || Infinity, speaker: url.searchParams.get('speaker'),
+      }),
+    })],
+    ['GET', /^\/api\/history\/top$/, async (_m, url) => ({
+      tracks: playHistory().top({ limit: limit(url), speaker: url.searchParams.get('speaker') }),
+      speakers: playHistory().speakers(),
+      minPlayS: config.historyMinPlayS ?? 30,
+    })],
+    ['POST', /^\/api\/history\/clear$/, async () => {
+      await playHistory().clear();
+      log.info('Playback history cleared on the status page');
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/cache\/clear$/, async () => ({ deleted: await mediaServer.clearCache() })],
     ['POST', /^\/api\/renderers\/([^/]+)\/format$/, async (m, _url, req) => {
       const { format } = await readJson(req);
       await renderer(m[1]).setFormatOverride(format ?? null);
@@ -90,6 +106,13 @@ export function startStatusServer(config, { renderers, mediaServer, settings }, 
     }],
     ['POST', /^\/api\/renderers\/([^/]+)\/pair$/, async (m) => ({ code: await renderer(m[1]).getPairingCode() })],
   ];
+
+  function playHistory() {
+    if (!history) throw Object.assign(new Error('History is disabled (HISTORY=false)'), { status: 404 });
+    return history;
+  }
+
+  const limit = (url) => Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 100));
 
   function renderer(id) {
     const r = renderers.get(decodeURIComponent(id));
@@ -115,6 +138,15 @@ export function startStatusServer(config, { renderers, mediaServer, settings }, 
       if (!tokenOk(config, req, url)) return json(res, 401, { error: 'Missing or wrong token. Open the page as /?token=…' });
 
       if (req.method === 'GET' && url.pathname === '/api/logs/stream') return streamLogs(req, res, url);
+      if (req.method === 'GET' && url.pathname === '/api/history.csv') {
+        // BOM: Excel otherwise reads the UTF-8 as ANSI and mangles accented titles.
+        const csv = '﻿' + playHistory().toCsv({ speaker: url.searchParams.get('speaker') });
+        res.writeHead(200, {
+          ...SECURITY_HEADERS, 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store',
+          'Content-Disposition': `attachment; filename="tube2upnp-history-${new Date().toISOString().slice(0, 10)}.csv"`,
+        }).end(csv);
+        return;
+      }
 
       for (const [method, re, handler] of routes) {
         const m = re.exec(url.pathname);

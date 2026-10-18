@@ -249,6 +249,60 @@ test('download gives up after the configured retries', { skip: !hasFfmpeg }, asy
   assert.equal(attempts, 2);
 });
 
+test('cache survives a restart; half-written files are dropped; clear works', { skip: !hasFfmpeg }, async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'persist-'));
+  const src = path.join(dir, 'src.m4a');
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5',
+    '-c:a', 'aac', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', src]);
+  let downloads = 0;
+  const make = () => new MediaServer(
+    { mediaPort: 0, ffmpegPath: 'ffmpeg', dataDir: dir },
+    { resolve: async () => ({ url: 'x', headers: {} }), invalidate: () => {} },
+    new Logger('none'),
+    { download: async (_id, _info, dest) => { downloads++; writeFileSync(dest, readFileSync(src)); } });
+  const entry = { videoId: 'iiiiiiiiiii', format: 'mp4', ext: 'm4a' };
+
+  const first = make();
+  await first.start();
+  await first.prepare(entry);
+  first.stop();
+  assert.equal(downloads, 1);
+  // Simulate a crash mid-download of another track.
+  writeFileSync(path.join(dir, 'cache', 'jjjjjjjjjjj.source.download'), 'half');
+
+  const second = make();
+  await second.start();
+  t.after(() => second.stop());
+  await second.prepare(entry);
+  assert.equal(downloads, 1, 'served from the cache kept on disk, not downloaded again');
+  assert.throws(() => readFileSync(path.join(dir, 'cache', 'jjjjjjjjjjj.source.download')), /ENOENT/, 'partial file removed');
+  assert.ok((await second.cacheInfo()).files >= 2);
+
+  assert.ok(await second.clearCache() >= 2);
+  assert.equal((await second.cacheInfo()).files, 0);
+  await second.prepare(entry);
+  assert.equal(downloads, 2, 'downloaded again after clearing');
+});
+
+test('clearing the cache keeps a file that is being played', { skip: !hasFfmpeg }, async (t) => {
+  // Bigger than the socket buffers (loopback send buffers grow to MBs), so the server is
+  // still sending when the cache is cleared.
+  const big = path.join(mkdtempSync(path.join(tmpdir(), 'big-')), 'big.m4a');
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=600',
+    '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', big]);
+  const { ms, dir } = await harness(t, {}, { download: async (_id, _info, dest) => writeFileSync(dest, readFileSync(big)) });
+  const entry = { videoId: 'ppppppppppp', format: 'mp4', ext: 'm4a' };
+  await ms.prepare(entry);
+  // A renderer mid-track: connected, reading slowly (here: not at all).
+  const req = http.get(`http://127.0.0.1:${ms.port}${ms.register(entry)}`);
+  const res = await new Promise((r) => req.on('response', r));
+  res.pause();
+  t.after(() => req.destroy());
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(await ms.clearCache(), 1, 'only the source is deleted');
+  assert.deepEqual(readdirSync(path.join(dir, 'cache')), ['ppppppppppp-mp4-0.m4a']);
+});
+
 test('range parsing', () => {
   assert.deepEqual(parseRange('bytes=0-', 10), { start: 0, end: 9 });
   assert.deepEqual(parseRange('bytes=-3', 10), { start: 7, end: 9 });
