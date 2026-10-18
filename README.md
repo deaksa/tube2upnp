@@ -49,6 +49,12 @@ Turn it on with `SPONSORBLOCK=true`, and choose what to skip with `SPONSORBLOCK_
 
 Lookups use SponsorBlock's privacy-preserving API: only the first 4 characters of a SHA-256 hash of the video ID are sent, and the results are filtered locally. If SponsorBlock is unreachable, tracks simply play without skips.
 
+### Playback history
+
+The status page's **History** view lists recently played tracks and the most played ones, for all speakers or one. A track counts once it has played for 30 seconds (`HISTORY_MIN_PLAY_S`) or half its length, whichever is shorter. Tracks skipped right away aren't counted, and seeking or a format change doesn't count a track twice. Each entry records the speaker and the YouTube account names connected to that speaker at the time. yt-cast-receiver doesn't say which of several connected phones started a track.
+
+History is stored in `DATA_DIR/history.json`. Play counts are kept forever; the list of individual plays keeps the most recent `HISTORY_MAX` (5000). **Download CSV** exports that list (UTF-8, opens in Excel), and **Clear history** deletes everything. Because the history includes account names, set `HISTORY=false` if you don't want it stored.
+
 ## Quick start (Docker, Linux host)
 
 ```sh
@@ -73,12 +79,13 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 ## Status page
 
-Open `http://<host>:8080/` in a browser. It has four views:
+Open `http://<host>:8080/` in a browser. It has five views:
 
 - **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Here you can also:
   - choose the **stream format for that speaker**. Same as default, Detect automatically, or a fixed format. It's saved per speaker and applied immediately: a playing track reloads at its current position.
   - clear a detected format, so it's detected again.
   - get a **TV code** for the YouTube app.
+- **History** shows recently played and most played tracks, per speaker or for all of them, with a CSV download (see [Playback history](#playback-history)).
 - **Logs** is the last 2000 log lines, live. You can filter by level or text, pause following, and download what's shown.
 - **Stats for nerds** covers:
   - CPU, memory and throughput graphs (last 10 minutes)
@@ -120,8 +127,8 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
-| `CACHE_MB` | `512` | Size cap for the `mp4` disk cache (downloaded and remuxed tracks), oldest evicted first. It's cleared on restart. |
-| `CACHE_DIR` | temp dir | Where that cache lives |
+| `CACHE_MB` | `512` | Size cap for the disk cache (downloaded tracks and built `mp4`/`flac` files). When it's exceeded, the least recently played files are removed first. |
+| `CACHE_DIR` | `DATA_DIR/cache` | Where that cache lives. It's kept across restarts (in Docker, inside the data volume). Use **Clear cache** on the status page after changing `YTDLP_FORMAT`. |
 | `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
 | `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |
@@ -139,6 +146,9 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `SPONSORBLOCK` | `false` | Skip SponsorBlock segments (see [SponsorBlock](#sponsorblock-off-by-default)). The status page can override it. |
 | `SPONSORBLOCK_CATEGORIES` | `music_offtopic,sponsor,selfpromo,interaction` | Comma-separated categories to skip |
 | `SPONSORBLOCK_API` | `https://sponsor.ajay.app` | SponsorBlock server (or a mirror) |
+| `HISTORY` | `true` | Keep a playback history (see [Playback history](#playback-history)) |
+| `HISTORY_MAX` | `5000` | Individual plays kept in the history list. Play counts are kept regardless. |
+| `HISTORY_MIN_PLAY_S` | `30` | Seconds a track must play (or half its length, if shorter) to count as played |
 | `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
 
 ## Troubleshooting

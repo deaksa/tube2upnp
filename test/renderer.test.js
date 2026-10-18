@@ -360,3 +360,76 @@ test('duration comes from the video, not a renderer still reporting the previous
   assert.equal(await r.doGetPosition(), 7);
   await r.destroy();
 });
+
+// History: a play counts after historyMinPlayS of actual PLAYING (scaled down for tests).
+function withHistory(fake, overrides = {}) {
+  const records = [];
+  const s = setup(fake, { historyMinPlayS: 0.25, ...overrides }, undefined, { history: { record: (e) => records.push(e) } });
+  return { ...s, records };
+}
+
+test('history: a track is counted once, after it has played long enough', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, records } = withHistory(fake);
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  await wait(100);
+  assert.equal(records.length, 0, 'not yet');
+  await wait(400);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].videoId, A);
+  assert.equal(records[0].udn, 'fake-renderer');
+  assert.equal(records[0].speakerName, '🔊 Living Room Speaker');
+  assert.equal(records[0].format, 'direct');
+  assert.equal(records[0].info.duration, 210);
+  await wait(300);
+  assert.equal(records.length, 1, 'counted once');
+  await r.destroy();
+});
+
+test('history: quick skips and paused time do not count', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, records } = withHistory(fake);
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  await r.doStop();
+  await r.doPlay({ id: B }, 0);
+  await r.doPause();
+  await wait(500);
+  assert.equal(records.length, 0);
+  await r.destroy();
+});
+
+test('history: seek restarts do not double-count, playing the track again does', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, records } = withHistory(fake, { outputFormat: 'mp3' });
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  await wait(450);
+  assert.equal(await r.doSeek(50), true); // mp3: reloads the stream
+  await wait(450);
+  assert.equal(records.length, 1);
+  await r.doPlay({ id: A }, 0); // the app plays it again
+  await wait(450);
+  assert.equal(records.length, 2);
+  await r.destroy();
+});
+
+test('history: gapless continuation counts both tracks', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, records } = withHistory(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.doPlay({ id: A }, 0);
+  await wait(450);
+  r.next = async () => r.doPlay({ id: B }, 0);
+  r.getUpcomingVideo = () => null;
+  fake.advance();
+  await wait(500);
+  assert.deepEqual(records.map((e) => e.videoId), [A, B]);
+  await r.destroy();
+});

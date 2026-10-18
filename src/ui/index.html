@@ -168,6 +168,22 @@
   .spark polyline { fill: none; stroke: var(--vfd); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
   .spark polygon { fill: rgba(255,181,71,.15); }
 
+  /* History */
+  .hgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr)); gap: 1rem; align-items: start; }
+  .hlist { list-style: none; margin: 0; padding: 0; }
+  .hrow { display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) auto; gap: .75rem; align-items: center;
+    padding: .45rem 0; border-top: 1px solid var(--plate-edge); }
+  .hrow:first-child { border-top: 0; }
+  .hrow.ranked { grid-template-columns: 1.6rem 2.75rem minmax(0, 1fr) auto; }
+  .hrow .rank { color: var(--muted); text-align: right; font-size: .9rem; }
+  .hrow .thumb { width: 2.75rem; aspect-ratio: 1; border-radius: .3rem; object-fit: cover; background: var(--glass); display: block; }
+  .hrow .what { min-width: 0; }
+  .hrow .t { display: block; font-weight: 600; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow a.t:hover { text-decoration: underline; }
+  .hrow .s { display: block; font-size: .8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .n { text-align: right; font-size: .85rem; white-space: nowrap; }
+  .hrow .n strong { font-size: 1.1rem; }
+
   /* Settings */
   .settings { max-width: 44rem; }
   .settings p { margin: 0 0 .75rem; }
@@ -200,6 +216,7 @@
   <nav role="tablist" aria-label="Views">
     <button role="tab" aria-selected="true" data-view="speakers">Speakers</button>
     <button role="tab" aria-selected="false" data-view="logs">Logs</button>
+    <button role="tab" aria-selected="false" data-view="history">History</button>
     <button role="tab" aria-selected="false" data-view="stats">Stats for nerds</button>
     <button role="tab" aria-selected="false" data-view="settings">Settings</button>
   </nav>
@@ -221,6 +238,8 @@
     <pre class="log" id="log" tabindex="0" aria-label="Log lines"></pre>
     <p class="hint" id="loghint"></p>
   </section>
+
+  <section id="history" hidden></section>
 
   <section id="stats" hidden></section>
 
@@ -273,7 +292,7 @@ const fmtDur = (s) => { const d = Math.floor(s / 86400), hh = Math.floor(s / 360
 const ms = (v) => (v == null ? '–' : v + ' ms');
 
 /* ---------------------------------------------------------------- views */
-const views = { speakers: refreshSpeakers, logs: openLogs, stats: refreshStats, settings: refreshSettings };
+const views = { speakers: refreshSpeakers, logs: openLogs, history: refreshHistory, stats: refreshStats, settings: refreshSettings };
 let current = 'speakers';
 document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
 function show(view) {
@@ -512,7 +531,14 @@ async function refreshStats() {
             ['MP4 builds (avg)', t['build.mp4'] ? t['build.mp4'].count + ' (' + ms(t['build.mp4'].avg) + ')' : '–'],
             ['FLAC builds (avg)', t['build.flac'] ? t['build.flac'].count + ' (' + ms(t['build.flac'].avg) + ')' : '–'],
             ['Cache reuse', (c['cache.hits'] || 0) + ' of ' + ((c['cache.hits'] || 0) + (c['cache.misses'] || 0))],
-            ['Cache size', fmtBytes(s.cache.bytes) + ' of ' + fmtBytes(s.cache.limitBytes) + ' (' + s.cache.files + ' files)']])),
+            ['Reused from disk', c['cache.diskHits'] || 0],
+            ['Cache size', fmtBytes(s.cache.bytes) + ' of ' + fmtBytes(s.cache.limitBytes) + ' (' + s.cache.files + ' files)']]),
+          h('p', { class: 'row', style: 'margin-top:.75rem' }, h('button', { class: 'btn', 'data-key': 'clear-cache', onclick: async () => {
+            if (!confirm('Delete all cached tracks? They will be downloaded again when played.')) return;
+            try { const r = await api('/api/cache/clear', { method: 'POST' }); toast('Cache cleared (' + r.deleted + ' files)'); }
+            catch (err) { toast(err.message); }
+            refreshStats();
+          } }, 'Clear cache'))),
         panel('UPnP control',
           dl([['SOAP calls', c['soap.calls'] || 0], ['Errors', c['soap.errors'] || 0], ['Average round trip', ms(soap.avg)],
             ['95th percentile', ms(soap.p95)], ['Default format', st.app.outputFormat], ['Prepare next track', st.app.prefetch ? 'on' : 'off'],
@@ -530,6 +556,88 @@ async function refreshStats() {
   } catch (e) { toast(e.message); }
 }
 setInterval(() => { if (current === 'stats' && !document.hidden) refreshStats(); }, 5000);
+
+/* -------------------------------------------------------------- history */
+const hist = { speaker: '', plays: [], more: false, paged: false };
+const PAGE_SIZE = 100;
+
+const ago = (at) => { const s = (Date.now() - at) / 1000;
+  if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+  return new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: s > 300 * 86400 ? 'numeric' : undefined }); };
+const thumb = (src) => (src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : h('span', { class: 'thumb' }));
+const trackLink = (t) => h('a', { class: 't', href: 'https://music.youtube.com/watch?v=' + encodeURIComponent(t.videoId),
+  target: '_blank', rel: 'noopener noreferrer', title: t.title }, t.title);
+
+async function loadPlays(append) {
+  const q = new URLSearchParams({ limit: PAGE_SIZE });
+  if (hist.speaker) q.set('speaker', hist.speaker);
+  if (append && hist.plays.length) q.set('before', hist.plays[hist.plays.length - 1].at);
+  const r = await api('/api/history?' + q);
+  hist.plays = append ? hist.plays.concat(r.plays) : r.plays;
+  hist.more = r.plays.length === PAGE_SIZE;
+  hist.paged = append;
+}
+
+async function refreshHistory({ append = false } = {}) {
+  try {
+    const q = new URLSearchParams({ limit: PAGE_SIZE });
+    if (hist.speaker) q.set('speaker', hist.speaker);
+    const [top] = await Promise.all([api('/api/history/top?' + q), loadPlays(append)]);
+    const names = Object.fromEntries(top.speakers.map((s) => [s.id, s.name]));
+    if (hist.speaker && !names[hist.speaker]) { hist.speaker = ''; return refreshHistory(); }
+
+    const select = h('select', { 'aria-label': 'Speaker', 'data-key': 'hist-speaker', onchange: (e) => {
+      hist.speaker = e.target.value; refreshHistory(); } },
+      h('option', { value: '' }, 'All speakers'),
+      top.speakers.map((s) => h('option', { value: s.id, selected: s.id === hist.speaker }, s.name)));
+    const toolbar = h('div', { class: 'toolbar' }, select,
+      h('button', { class: 'btn', 'data-key': 'hist-csv', onclick: downloadHistoryCsv }, 'Download CSV'),
+      h('button', { class: 'btn', 'data-key': 'hist-clear', onclick: async () => {
+        if (!confirm('Delete the whole playback history and all play counts, for every speaker?')) return;
+        try { await api('/api/history/clear', { method: 'POST' }); toast('History cleared'); }
+        catch (err) { toast(err.message); }
+        hist.speaker = ''; refreshHistory();
+      } }, 'Clear history'));
+
+    const topList = top.tracks.length
+      ? h('ol', { class: 'hlist' }, top.tracks.map((t, i) => h('li', { class: 'hrow ranked' },
+        h('span', { class: 'rank' }, i + 1), thumb(t.thumbnail),
+        h('span', { class: 'what' }, trackLink(t), h('span', { class: 's' }, t.artist || ' ')),
+        h('span', { class: 'n', title: 'Last played ' + new Date(t.lastPlayed).toLocaleString() },
+          h('strong', {}, t.plays), t.plays === 1 ? ' play' : ' plays'))))
+      : h('p', { class: 'muted' }, 'Nothing played yet.');
+    const recentList = hist.plays.length
+      ? h('ul', { class: 'hlist' }, hist.plays.map((p) => h('li', { class: 'hrow' }, thumb(p.thumbnail),
+        h('span', { class: 'what' }, trackLink(p), h('span', { class: 's' }, [p.artist,
+          hist.speaker ? null : p.speakerName, p.senders.length ? 'by ' + p.senders.join(', ') : null].filter(Boolean).join(' · ') || ' ')),
+        h('span', { class: 'n muted', title: new Date(p.at).toLocaleString() + (p.format ? ' · ' + p.format : '') }, ago(p.at)))))
+      : h('p', { class: 'muted' }, 'Nothing played yet.');
+
+    document.getElementById('history').replaceChildren(toolbar,
+      h('div', { class: 'hgrid' },
+        panel('Most played' + (hist.speaker ? ' on ' + names[hist.speaker] : ''), topList),
+        panel('Recently played', recentList,
+          hist.more ? h('p', { class: 'row', style: 'margin:.75rem 0 0' }, h('button', { class: 'btn', 'data-key': 'hist-more',
+            onclick: () => refreshHistory({ append: true }) }, 'Load more')) : null)),
+      h('p', { class: 'hint', style: 'margin-top:1rem' }, 'A track counts once it has played for ' + top.minPlayS + ' seconds or half its length. '
+        + '"by" names everyone connected to the speaker at the time. Play counts are kept forever; the list keeps the most recent plays.'));
+    const focusKey = sessionStorage.getItem('focus');
+    if (focusKey) document.querySelector(`#history [data-key="${CSS.escape(focusKey)}"]`)?.focus();
+  } catch (e) { toast(e.message); }
+}
+
+async function downloadHistoryCsv() {
+  try {
+    const q = hist.speaker ? '?speaker=' + encodeURIComponent(hist.speaker) : '';
+    const res = await fetch('/api/history.csv' + q, { headers: authHeaders });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Download failed (HTTP ' + res.status + ')');
+    const a = h('a', { href: URL.createObjectURL(await res.blob()), download: 'tube2upnp-history-' + new Date().toISOString().slice(0, 10) + '.csv' });
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (err) { toast(err.message); }
+}
+// Keep the first page fresh; once "Load more" was used, leave the list alone.
+setInterval(() => { if (current === 'history' && !document.hidden && !hist.paged) refreshHistory(); }, 15000);
 
 /* ------------------------------------------------------------- settings */
 async function refreshSettings() {

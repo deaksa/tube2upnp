@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { startStatusServer } from '../src/statusServer.js';
 import { Logger, recentLogs } from '../src/logger.js';
 import { Settings } from '../src/settings.js';
+import { History } from '../src/history.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -23,12 +24,13 @@ async function start(t, cfg = {}) {
   const conf = { statusPort: 0, outputFormat: 'mp4', dataDir: mkdtempSync(path.join(tmpdir(), 'st-')),
     sponsorblock: false, sponsorblockCategories: ['sponsor'], ...cfg };
   const settings = await new Settings(conf, new Logger('none')).load();
+  const history = cfg.history === false ? null : await new History(conf, new Logger('none')).load();
   const server = startStatusServer(conf,
-    { renderers: new Map([['r1', r]]), settings, mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
+    { renderers: new Map([['r1', r]]), settings, history, mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
     new Logger('none'));
   await new Promise((res) => server.once('listening', res));
   t.after(() => server.close());
-  return { base: `http://127.0.0.1:${server.address().port}`, r, settings };
+  return { base: `http://127.0.0.1:${server.address().port}`, r, settings, history };
 }
 
 const post = (url, body, headers = {}) => fetch(url, {
@@ -100,4 +102,36 @@ test('SponsorBlock settings: read, change (validated, CSRF-protected), reset', a
   assert.deepEqual(settings.sponsorblock, { enabled: true, categories: ['music_offtopic'], fromEnv: false });
   assert.equal((await post(base + '/api/settings/sponsorblock/reset', {}, { 'X-Tube2upnp': '1' })).status, 200);
   assert.equal((await get()).enabled, false);
+});
+
+test('history: list, most played, CSV download, clear (CSRF-protected)', async (t) => {
+  const { base, history } = await start(t);
+  const song = { title: 'Dal', artist: 'Előadó' };
+  history.record({ videoId: 'AAAAAAAAAAA', udn: 'r1', speakerName: 'R1', info: song, senders: ['Anna'], at: 1000 });
+  history.record({ videoId: 'AAAAAAAAAAA', udn: 'r2', speakerName: 'R2', info: song, at: 2000 });
+
+  const list = await (await fetch(base + '/api/history?speaker=r1')).json();
+  assert.deepEqual(list.plays.map((p) => [p.videoId, p.speakerName, p.senders]), [['AAAAAAAAAAA', 'R1', ['Anna']]]);
+  const top = await (await fetch(base + '/api/history/top')).json();
+  assert.equal(top.tracks[0].plays, 2);
+  assert.deepEqual(top.speakers.map((s) => s.id), ['r1', 'r2']);
+
+  const csv = await fetch(base + '/api/history.csv');
+  assert.match(csv.headers.get('content-type'), /^text\/csv; charset=utf-8/);
+  assert.match(csv.headers.get('content-disposition'), /attachment; filename="tube2upnp-history-/);
+  const bytes = Buffer.from(await csv.arrayBuffer());
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'UTF-8 BOM for Excel');
+  assert.match(bytes.toString('utf8'), /Előadó/);
+
+  assert.equal((await post(base + '/api/history/clear', {})).status, 403);
+  assert.equal((await post(base + '/api/history/clear', {}, { 'X-Tube2upnp': '1' })).status, 200);
+  assert.deepEqual(history.top(), []);
+});
+
+test('history endpoints answer 404 when HISTORY=false', async (t) => {
+  const { base } = await start(t, { history: false });
+  const res = await fetch(base + '/api/history');
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /HISTORY=false/);
+  assert.equal((await fetch(base + '/api/history.csv')).status, 404);
 });

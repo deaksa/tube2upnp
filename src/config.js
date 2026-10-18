@@ -86,7 +86,8 @@ export const config = Object.freeze({
     return b;
   })(),
 
-  // Disk cache for downloaded tracks and built mp4/flac files.
+  // Disk cache for downloaded tracks and built mp4/flac files. Kept across restarts;
+  // default DATA_DIR/cache.
   cacheDir: str('CACHE_DIR', null),
   cacheMb: int('CACHE_MB', 512),
 
@@ -107,6 +108,13 @@ export const config = Object.freeze({
   sponsorblockCategories: str('SPONSORBLOCK_CATEGORIES', 'music_offtopic,sponsor,selfpromo,interaction')
     .split(',').map((c) => c.trim()).filter(Boolean),
   sponsorblockApi: str('SPONSORBLOCK_API', 'https://sponsor.ajay.app'),
+
+  // Playback history (status page "History" view), in DATA_DIR/history.json. Play counts
+  // are kept forever; the list of individual plays keeps the newest HISTORY_MAX entries.
+  // A track counts once it has played HISTORY_MIN_PLAY_S seconds or half its length.
+  history: bool('HISTORY', true),
+  historyMax: int('HISTORY_MAX', 5000),
+  historyMinPlayS: int('HISTORY_MIN_PLAY_S', 30),
 
   // Prepare the next track in the queue while the current one plays (instant skip).
   prefetch: bool('PREFETCH', true),

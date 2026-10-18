@@ -25,6 +25,7 @@ export class Renderer extends Player {
   #position = null;        // { rel, dur, at } from the last poll
   #soap = { calls: 0, errors: 0, totalMs: 0 };
   #sb = { videoId: null, segments: [], skipped: new Set(), loading: false, timer: null };
+  #listen = { videoId: null, playedMs: 0, lastTick: 0, counted: false }; // for the play history
   #polls = 0;
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
@@ -40,7 +41,7 @@ export class Renderer extends Player {
    * @param {string} p.address   - renderer IP (SSDP source address)
    * @param {number} p.maxAge    - SSDP cache max-age in seconds
    * @param {number} p.port      - DIAL port for this receiver
-   * @param {object} p.deps      - { config, resolver, mediaServer, logger, createReceiver? }
+   * @param {object} p.deps      - { config, resolver, mediaServer, logger, sponsorblock?, history?, createReceiver? }
    */
   constructor({ udn, location, address, maxAge, port, deps }) {
     super();
@@ -51,6 +52,7 @@ export class Renderer extends Player {
     this.cfg = deps.config;
     this.resolver = deps.resolver;
     this.sponsorblock = deps.sponsorblock ?? null;
+    this.history = deps.history ?? null;
     this.media = deps.mediaServer;
     this.createReceiver = deps.createReceiver ?? ((player, opts) => new YouTubeCastReceiver(player, opts));
     this.baseLog = deps.logger;
@@ -205,6 +207,9 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
+    // A play request from YouTube starts a new listen. Our own reloads of the same track
+    // (seek restart, format fallback) go straight to #load and keep counting.
+    this.#listen = { videoId: video.id, playedMs: 0, lastTick: 0, counted: false };
     const adv = this.#advanced;
     this.#advanced = null;
     if (adv && adv.video.id === video.id && position < 2) {
@@ -362,6 +367,37 @@ export class Renderer extends Player {
     if (await this.doSeek(seg.end)) {
       this.#position = { ...this.#position, rel: seg.end, at: Date.now() };
       await this.notifyExternalStateChange(PLAYER_STATUSES.PLAYING); // updates the app's progress bar
+    }
+  }
+
+  // ----------------------------------------------------------------- history
+
+  /**
+   * Add the time since the last PLAYING poll to this listen, and record a play once it
+   * reaches HISTORY_MIN_PLAY_S (30 s) or half the track, whichever is shorter, so quick
+   * skips don't count.
+   */
+  #countListen() {
+    const l = this.#listen;
+    const c = this.#current;
+    if (!this.history || !c || l.videoId !== c.video.id) return;
+    const now = Date.now();
+    // Capped per tick: a poll stuck on a slow renderer must not add minutes at once.
+    if (l.lastTick) l.playedMs += Math.min(now - l.lastTick, 2 * this.cfg.pollIntervalMs);
+    l.lastTick = now;
+    const minS = this.cfg.historyMinPlayS ?? 30;
+    const dur = this.nowPlaying?.duration || 0;
+    const needS = dur ? Math.min(minS, dur / 2) : minS;
+    if (l.counted || l.playedMs / 1000 < needS) return;
+    l.counted = true;
+    try {
+      this.history.record({
+        videoId: c.video.id, info: this.nowPlaying ?? {}, udn: this.udn, speakerName: this.name,
+        senders: this.connectedSenders.map((s) => s.user?.name ?? s.name).filter(Boolean),
+        format: c.format, playedS: l.playedMs / 1000,
+      });
+    } catch (err) {
+      this.log.warn('Could not record play history:', err.message);
     }
   }
 
@@ -667,6 +703,7 @@ export class Renderer extends Player {
   // subscriptions, and eventing needs an inbound callback port through NAT/firewalls.
   #startPolling() {
     this.#stopPolling();
+    this.#listen.lastTick = 0;
     this.#pollTimer = setInterval(() => {
       if (this.#polling) return; // a slow renderer must not stack up overlapping polls
       this.#polling = true;
@@ -686,6 +723,7 @@ export class Renderer extends Player {
     const state = await this.#transportState();
     if (!state) return;
     this.#transport = state;
+    if (state !== 'PLAYING') this.#listen.lastTick = 0; // paused/buffering time doesn't count
     if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
       const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
       if (r) {
@@ -717,6 +755,7 @@ export class Renderer extends Player {
     if (state === 'PLAYING') {
       if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
+      this.#countListen(); // before a gapless switch below hands over to the next track
       if (this.status === PLAYER_STATUSES.PAUSED) await this.notifyExternalStateChange(PLAYER_STATUSES.PLAYING);
 
       if (await this.#rendererAdvanced()) {

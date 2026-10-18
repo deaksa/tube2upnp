@@ -16,6 +16,7 @@ import { downloadWithYtdlp } from './resolver.js';
 import { stats } from './stats.js';
 
 const MAX_TOKENS = 256;
+const CACHE_FILE = /\.(m4a|flac|source)$/;
 const PASSTHROUGH_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
 
 export function parseRange(header, size) {
@@ -44,12 +45,23 @@ export class MediaServer {
     this.log = logger;
     this.download = opts.download
       ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
-    this.cacheDir = config.cacheDir ?? path.join(os.tmpdir(), 'tube2upnp-cache');
+    // Default: under DATA_DIR, so the cache survives restarts (and the Docker data volume
+    // keeps it), and it isn't a predictable path in a shared temp folder.
+    this.cacheDir = config.cacheDir ?? path.join(config.dataDir ?? os.tmpdir(), 'cache');
   }
 
   async start() {
-    await fsp.rm(this.cacheDir, { recursive: true, force: true });
-    await fsp.mkdir(this.cacheDir, { recursive: true });
+    await fsp.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
+    // Keep finished files from earlier runs; drop anything a crash or restart left half-written.
+    let kept = 0;
+    let bytes = 0;
+    for (const f of await fsp.readdir(this.cacheDir)) {
+      const full = path.join(this.cacheDir, f);
+      if (/\.(part|download|info\.json)$/.test(f)) await fsp.rm(full, { force: true });
+      else if (CACHE_FILE.test(f)) { kept++; bytes += (await fsp.stat(full)).size; }
+    }
+    if (kept) this.log.info(`Cache: ${kept} file(s), ${(bytes / 1048576).toFixed(0)} MB kept from earlier runs (${this.cacheDir})`);
+    await this.#pruneCache();
     await new Promise((resolve, reject) => {
       this.#server = http.createServer((req, res) => this.#handle(req, res).catch((err) => {
         this.log.error('Stream error:', err.message);
@@ -202,7 +214,7 @@ export class MediaServer {
     let bytes = 0;
     try {
       for (const f of await fsp.readdir(this.cacheDir)) {
-        if (!/\.(m4a|flac|source)$/.test(f)) continue;
+        if (!CACHE_FILE.test(f)) continue;
         files++;
         bytes += (await fsp.stat(path.join(this.cacheDir, f))).size;
       }
@@ -218,19 +230,26 @@ export class MediaServer {
   #sourceFile(videoId) {
     return this.#once(this.#downloadJobs, videoId, async () => {
       const dest = path.join(this.cacheDir, `${videoId}.source`);
+      if (await this.#reuse(dest)) return dest;
+      // Not ".part": yt-dlp strips that suffix from -o names and would write straight to dest.
+      const part = `${dest}.download`;
       const started = Date.now();
       const delays = this.cfg.downloadRetryDelaysMs ?? [2000, 5000];
       for (let attempt = 0; ; attempt++) {
         try {
           const info = await this.resolver.resolve(videoId);
           const t = Date.now();
-          await this.download(videoId, info, dest);
+          // Download to a temp name and rename, so an interrupted download is never mistaken
+          // for a complete file after a restart.
+          await this.download(videoId, info, part);
+          await fsp.rename(part, dest);
           stats.time('download', Date.now() - t);
           break;
         } catch (err) {
           // A 403 on a URL that's seconds old isn't expiry: YouTube handed out a format URL
           // it won't serve (it varies per extraction). Drop it and extract afresh.
           this.resolver.invalidate(videoId);
+          await fsp.rm(part, { force: true });
           if (err.forbidden) stats.inc('download.forbidden');
           if (attempt >= delays.length) {
             stats.inc('download.failed');
@@ -264,8 +283,9 @@ export class MediaServer {
   }
 
   async #runRemux(entry, key) {
-    const src = await this.#sourceFile(entry.videoId);
     const file = path.join(this.cacheDir, `${key}.${FORMATS[entry.format].ext}`);
+    if (await this.#reuse(file)) return file;
+    const src = await this.#sourceFile(entry.videoId);
     const part = `${file}.part`;
     const started = Date.now();
     const args = [
@@ -289,6 +309,34 @@ export class MediaServer {
     return file;
   }
 
+  /** Use a finished file from the cache (this or an earlier run) and mark it recently used. */
+  async #reuse(file) {
+    try {
+      const st = await fsp.stat(file);
+      if (!st.size) return false;
+      const now = new Date();
+      await fsp.utimes(file, now, now); // LRU by mtime: atime is often not updated (relatime/noatime)
+      stats.inc('cache.diskHits');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Delete every cached file (e.g. after changing YTDLP_FORMAT). */
+  async clearCache() {
+    this.#downloadJobs.clear();
+    this.#remuxJobs.clear();
+    let n = 0;
+    for (const f of await fsp.readdir(this.cacheDir)) {
+      if (!CACHE_FILE.test(f)) continue;
+      await fsp.rm(path.join(this.cacheDir, f), { force: true });
+      n++;
+    }
+    this.log.info(`Cache cleared (${n} file(s))`);
+    return n;
+  }
+
   #fileCodecArgs(format) {
     if (format === 'flac') {
       // AAC decodes to float; store as 16- or 24-bit integer PCM, losslessly compressed.
@@ -301,9 +349,9 @@ export class MediaServer {
   async #pruneCache() {
     const limit = (this.cfg.cacheMb ?? 512) * 1048576;
     const files = await Promise.all((await fsp.readdir(this.cacheDir))
-      .filter((f) => /\.(m4a|flac|source)$/.test(f))
+      .filter((f) => CACHE_FILE.test(f))
       .map(async (f) => ({ f, ...(await fsp.stat(path.join(this.cacheDir, f))) })));
-    files.sort((a, b) => b.atimeMs - a.atimeMs); // newest first
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs); // most recently used first
     let total = 0;
     for (const x of files) {
       total += x.size;
