@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MediaServer, parseRange } from '../src/mediaServer.js';
@@ -178,6 +178,33 @@ test('a renderer that hangs up while the stream is being prepared leaves nothing
   await new Promise((r) => setTimeout(r, 1500));
   assert.equal(stats.gauges['ffmpeg.active'] ?? 0, 0, 'no ffmpeg left behind');
   assert.equal(stats.gauges['http.active'] ?? 0, 0);
+});
+
+test('cache: a file larger than CACHE_MB is still served; older files are evicted first', { skip: !hasFfmpeg }, async (t) => {
+  const { get, dir } = await harness(t, { cacheMb: 0 });
+  const cached = () => readdirSync(path.join(dir, 'cache')).sort();
+  const a = await get({ videoId: 'mmmmmmmmmmm', format: 'mp4', ext: 'm4a' });
+  assert.equal(a.res.status, 200);
+  assert.ok(probe(a.out, 'format=duration') > 59, 'complete file served');
+  await new Promise((r) => setTimeout(r, 200)); // eviction runs in the background
+  assert.deepEqual(cached(), ['mmmmmmmmmmm-mp4-0.m4a', 'mmmmmmmmmmm.source'], 'just built: kept');
+
+  const b = await get({ videoId: 'nnnnnnnnnnn', format: 'flac', ext: 'm4a' });
+  assert.equal(b.res.status, 200);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(cached(), ['nnnnnnnnnnn-flac-0.flac', 'nnnnnnnnnnn.source'], 'older track evicted');
+});
+
+test('cache: a file that vanished after it was built is built again', { skip: !hasFfmpeg }, async (t) => {
+  const { get, dir, downloads } = await harness(t);
+  const entry = { videoId: 'ooooooooooo', format: 'mp4', ext: 'm4a' };
+  await get(entry);
+  const before = downloads();
+  for (const f of readdirSync(path.join(dir, 'cache'))) rmSync(path.join(dir, 'cache', f)); // e.g. a tmp cleaner
+  const again = await get(entry);
+  assert.equal(again.res.status, 200);
+  assert.ok(probe(again.out, 'format=duration') > 59);
+  assert.equal(downloads() - before, 1, 'source downloaded again');
 });
 
 test('download retries with a fresh extraction after a 403', { skip: !hasFfmpeg }, async (t) => {

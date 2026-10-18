@@ -120,7 +120,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
-| `CACHE_MB` | `512` | Size cap for the `mp4` disk cache (downloaded and remuxed tracks), oldest evicted first. It's cleared on restart. |
+| `CACHE_MB` | `512` | Size cap for the `mp4`/`flac` disk cache (downloaded and built tracks). The least recently used files are evicted first; files being downloaded or played, and the track just built, are never evicted, even if that track alone is bigger than the cap. It's cleared on restart. |
 | `CACHE_DIR` | temp dir | Where that cache lives |
 | `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
 | `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |

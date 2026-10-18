@@ -33,6 +33,8 @@ export class MediaServer {
   #server = null;
   #remuxJobs = new Map();    // `${videoId}-${format}-${startAt}` -> Promise<file path>
   #downloadJobs = new Map(); // videoId -> Promise<source path>
+  #pins = new Map();         // cache file name -> number of downloads/builds/responses using it
+  #lastUsed = new Map();     // cache file name -> ms, for least-recently-used eviction
 
   /**
    * @param {object} [opts]
@@ -106,7 +108,7 @@ export class MediaServer {
     switch (entry.format) {
       case 'mp4':
       case 'flac':
-        return this.#serveFile(req, res, entry.format, await this.#remuxToFile(entry));
+        return this.#serveFile(req, res, entry);
       case 'adts': return this.#pipe(req, res, entry, ['-c:a', 'copy', '-f', 'adts']);
       case 'mp3': return this.#pipe(req, res, entry, ['-c:a', 'libmp3lame', '-b:a', this.cfg.mp3Bitrate, '-f', 'mp3']);
       default: return this.#proxy(req, res, entry, await this.resolver.resolve(entry.videoId), true);
@@ -200,7 +202,7 @@ export class MediaServer {
         this.resolver.invalidate(videoId);
         return this.#urlInputArgs(await this.resolver.resolve(videoId), startAt);
       }],
-      ['the yt-dlp download', async () => this.#fileInputArgs(await this.#sourceFile(videoId), startAt)],
+      ['the yt-dlp download', async () => this.#fileInputArgs(await this.#existingSourceFile(videoId), startAt)],
     ];
     // Source already downloaded (e.g. mp4 was tried before): no need to ask YouTube.
     if (this.#downloadJobs.has(videoId)) attempts.unshift(attempts.pop());
@@ -277,9 +279,37 @@ export class MediaServer {
     return { dir: this.cacheDir, files, bytes, limitBytes: (this.cfg.cacheMb ?? 512) * 1048576 };
   }
 
+  #remuxKey(entry) {
+    return `${entry.videoId}-${entry.format}-${entry.startAt ?? 0}`;
+  }
+
   #remuxToFile(entry) {
-    const key = `${entry.videoId}-${entry.format}-${entry.startAt ?? 0}`;
+    const key = this.#remuxKey(entry);
     return this.#once(this.#remuxJobs, key, () => this.#runRemux(entry, key));
+  }
+
+  /** Mark a cache file as in use so eviction leaves it alone; returns the release function. */
+  #pin(file) {
+    const name = path.basename(file);
+    this.#pins.set(name, (this.#pins.get(name) ?? 0) + 1);
+    this.#lastUsed.set(name, Date.now());
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const n = this.#pins.get(name) - 1;
+      if (n > 0) this.#pins.set(name, n);
+      else this.#pins.delete(name);
+    };
+  }
+
+  /** The downloaded source, downloaded again if it vanished (evicted, or a tmp cleaner). */
+  async #existingSourceFile(videoId) {
+    const job = this.#sourceFile(videoId);
+    const src = await job;
+    if (fs.existsSync(src)) return src;
+    if (this.#downloadJobs.get(videoId) === job) this.#downloadJobs.delete(videoId);
+    return this.#sourceFile(videoId);
   }
 
   #sourceFile(videoId) {
@@ -287,37 +317,46 @@ export class MediaServer {
       const dest = path.join(this.cacheDir, `${videoId}.source`);
       const started = Date.now();
       const delays = this.cfg.downloadRetryDelaysMs ?? [2000, 5000];
-      for (let attempt = 0; ; attempt++) {
-        try {
-          const info = await this.resolver.resolve(videoId);
-          const t = Date.now();
-          await this.download(videoId, info, dest);
-          stats.time('download', Date.now() - t);
-          break;
-        } catch (err) {
-          // A 403 on a URL that's seconds old isn't expiry: YouTube handed out a format URL
-          // it won't serve (it varies per extraction). Drop it and extract afresh.
-          this.resolver.invalidate(videoId);
-          if (err.forbidden) stats.inc('download.forbidden');
-          if (attempt >= delays.length) {
-            stats.inc('download.failed');
-            if (err.forbidden) {
-              this.log.warn('YouTube keeps refusing downloads (403). If this persists, see README '
-                + '"yt-dlp errors" - a PO-token provider or cookies usually fix it.');
-            }
-            throw err;
-          }
-          this.log.warn(`${err.message.replace(/^yt-dlp download failed for \S+: /, 'Download failed: ')}`
-            + ` - retrying with a fresh extraction in ${delays[attempt] / 1000}s (${attempt + 1}/${delays.length})`);
-          stats.inc('download.retries');
-          await new Promise((r) => setTimeout(r, delays[attempt]));
-        }
+      const unpin = this.#pin(dest); // written in place (--no-part): don't evict half a file
+      try {
+        await this.#download(videoId, dest, delays);
+      } finally {
+        unpin();
       }
       const { size } = await fsp.stat(dest);
       stats.inc('download.bytes', size);
       this.log.info(`Downloaded ${videoId} (${(size / 1048576).toFixed(1)} MB) in ${Date.now() - started} ms`);
       return dest;
     });
+  }
+
+  async #download(videoId, dest, delays) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const info = await this.resolver.resolve(videoId);
+        const t = Date.now();
+        await this.download(videoId, info, dest);
+        stats.time('download', Date.now() - t);
+        break;
+      } catch (err) {
+        // A 403 on a URL that's seconds old isn't expiry: YouTube handed out a format URL
+        // it won't serve (it varies per extraction). Drop it and extract afresh.
+        this.resolver.invalidate(videoId);
+        if (err.forbidden) stats.inc('download.forbidden');
+        if (attempt >= delays.length) {
+          stats.inc('download.failed');
+          if (err.forbidden) {
+            this.log.warn('YouTube keeps refusing downloads (403). If this persists, see README '
+              + '"yt-dlp errors" - a PO-token provider or cookies usually fix it.');
+          }
+          throw err;
+        }
+        this.log.warn(`${err.message.replace(/^yt-dlp download failed for \S+: /, 'Download failed: ')}`
+          + ` - retrying with a fresh extraction in ${delays[attempt] / 1000}s (${attempt + 1}/${delays.length})`);
+        stats.inc('download.retries');
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+    }
   }
 
   /** Run a job once per key; forget it if it fails so the next request retries. */
@@ -331,7 +370,7 @@ export class MediaServer {
   }
 
   async #runRemux(entry, key) {
-    const src = await this.#sourceFile(entry.videoId);
+    const src = await this.#existingSourceFile(entry.videoId);
     const file = path.join(this.cacheDir, `${key}.${FORMATS[entry.format].ext}`);
     const part = `${file}.part`;
     const started = Date.now();
@@ -340,19 +379,31 @@ export class MediaServer {
       ...(entry.startAt > 0 ? ['-ss', String(entry.startAt)] : []),
       '-i', src, '-vn', ...this.#fileCodecArgs(entry.format), '-y', part,
     ];
+    const unpinSrc = this.#pin(src);
     stats.gauge('ffmpeg.active', 1);
-    await new Promise((resolve, reject) => {
-      const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-      ff.on('close', () => stats.gauge('ffmpeg.active', -1));
-      let err = '';
-      ff.stderr.on('data', (d) => { err += d; });
-      ff.on('error', reject);
-      ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg remux exited ${code}: ${err.trim().split('\n').pop()}`))));
-    });
-    await fsp.rename(part, file);
+    try {
+      await new Promise((resolve, reject) => {
+        const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        ff.on('close', () => stats.gauge('ffmpeg.active', -1));
+        let err = '';
+        ff.stderr.on('data', (d) => { err += d; });
+        ff.on('error', reject);
+        ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg remux exited ${code}: ${err.trim().split('\n').pop()}`))));
+      });
+      await fsp.rename(part, file);
+    } catch (err) {
+      await fsp.rm(part, { force: true });
+      throw err;
+    } finally {
+      unpinSrc();
+    }
+    this.#lastUsed.set(path.basename(file), Date.now());
     stats.time(`build.${entry.format}`, Date.now() - started);
     this.log.info(`${entry.format === 'mp4' ? 'Remuxed' : 'Encoded'} ${entry.videoId}${entry.startAt ? ` @${entry.startAt}s` : ''} to ${entry.format.toUpperCase()} in ${Date.now() - started} ms`);
-    this.#pruneCache().catch(() => {});
+    // Never evict what was just built (or its source), even if it alone exceeds CACHE_MB:
+    // the renderer is about to fetch it. It becomes evictable once something newer is built.
+    this.#pruneCache([path.basename(file), path.basename(src)])
+      .catch((err) => this.log.debug('Cache cleanup failed:', err.message));
     return file;
   }
 
@@ -365,26 +416,59 @@ export class MediaServer {
     return ['-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4'];
   }
 
-  async #pruneCache() {
+  /** Evict least-recently-used files until the cache fits CACHE_MB, sparing files in use. */
+  async #pruneCache(keep = []) {
     const limit = (this.cfg.cacheMb ?? 512) * 1048576;
-    const files = await Promise.all((await fsp.readdir(this.cacheDir))
-      .filter((f) => /\.(m4a|flac|source)$/.test(f))
-      .map(async (f) => ({ f, ...(await fsp.stat(path.join(this.cacheDir, f))) })));
-    files.sort((a, b) => b.atimeMs - a.atimeMs); // newest first
-    let total = 0;
-    for (const x of files) {
-      total += x.size;
-      if (total > limit) {
-        if (x.f.endsWith('.source')) this.#downloadJobs.delete(x.f.slice(0, -'.source'.length));
-        else this.#remuxJobs.delete(x.f.replace(/\.\w+$/, ''));
-        await fsp.rm(path.join(this.cacheDir, x.f), { force: true });
+    const names = (await fsp.readdir(this.cacheDir)).filter((f) => /\.(m4a|flac|source)$/.test(f));
+    const files = (await Promise.all(names.map(async (f) => {
+      try {
+        const st = await fsp.stat(path.join(this.cacheDir, f));
+        // Our own timestamps, not atime: noatime/relatime mounts barely update it.
+        return { f, size: st.size, used: this.#lastUsed.get(f) ?? st.mtimeMs };
+      } catch {
+        return null; // removed meanwhile
       }
+    }))).filter(Boolean);
+    let total = files.reduce((n, x) => n + x.size, 0);
+    files.sort((a, b) => a.used - b.used); // least recently used first
+    for (const x of files) {
+      if (total <= limit) break;
+      if (keep.includes(x.f) || this.#pins.has(x.f)) continue; // being written, read or just built
+      if (x.f.endsWith('.source')) this.#downloadJobs.delete(x.f.slice(0, -'.source'.length));
+      else this.#remuxJobs.delete(x.f.replace(/\.\w+$/, ''));
+      this.#lastUsed.delete(x.f);
+      await fsp.rm(path.join(this.cacheDir, x.f), { force: true });
+      total -= x.size;
+      stats.inc('cache.evictions');
     }
   }
 
-  async #serveFile(req, res, format, file) {
-    const { size } = await fsp.stat(file);
-    if (res.destroyed) return; // hung up while the file was being built
+  async #serveFile(req, res, entry) {
+    const job = this.#remuxToFile(entry);
+    let file = await job;
+    let unpin = this.#pin(file);
+    try {
+      let size;
+      try {
+        ({ size } = await fsp.stat(file));
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+        // Gone since it was built (evicted, or a tmp cleaner): build it again.
+        unpin();
+        const key = this.#remuxKey(entry);
+        if (this.#remuxJobs.get(key) === job) this.#remuxJobs.delete(key);
+        file = await this.#remuxToFile(entry);
+        unpin = this.#pin(file);
+        ({ size } = await fsp.stat(file));
+      }
+      if (res.destroyed) return; // hung up while the file was being built
+      await this.#sendFile(req, res, entry.format, file, size);
+    } finally {
+      unpin();
+    }
+  }
+
+  async #sendFile(req, res, format, file, size) {
     const headers = { ...this.#headers(format, FORMATS[format].mime), 'Accept-Ranges': 'bytes' };
     const range = req.headers.range ? parseRange(req.headers.range, size) : null;
     if (range === 'invalid') {
