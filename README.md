@@ -106,7 +106,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. Tube2U[PnP] pas
 
 ## Configuration (environment variables)
 
-With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common ones through. When running without Docker, set them as normal environment variables.
+With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all through, except `CACHE_DIR`, `DATA_DIR` and the yt-dlp paths and runtime, which the image sets. When running without Docker, set them as normal environment variables.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -120,7 +120,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
-| `CACHE_MB` | `512` | Size cap for the `mp4` disk cache (downloaded and remuxed tracks), oldest evicted first. It's cleared on restart. |
+| `CACHE_MB` | `512` | Size cap for the `mp4`/`flac` disk cache (downloaded and built tracks). The least recently used files are evicted first; files being downloaded or played, and the track just built, are never evicted, even if that track alone is bigger than the cap. It's cleared on restart. |
 | `CACHE_DIR` | temp dir | Where that cache lives |
 | `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
 | `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |
@@ -155,6 +155,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).**
 - Occasional `HTTP Error 403` on download is normal. YouTube sometimes hands out a format URL it then refuses to serve. Tube2U[PnP] discards it and retries with a fresh lookup (two retries, after 2 s and 5 s), which almost always succeeds.
+- With `adts` and `mp3`, ffmpeg reads YouTube's stream itself. If YouTube refuses it, Tube2U[PnP] retries with a fresh lookup, then falls back to downloading the track with yt-dlp first (the stream then starts a few seconds later).
 - If 403s happen on most tracks:
   - Update yt-dlp first. This happens automatically by default.
   - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.

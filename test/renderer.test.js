@@ -271,6 +271,45 @@ test('queue change replaces the prepared next track', async (t) => {
   await r.destroy();
 });
 
+test('a next track that cannot be prepared is not retried on every poll', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, resolves } = setup(fake, { prefetch: true, gapless: true });
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => {
+    if (id === B) { resolves.push(id); throw new Error('Video unavailable'); }
+    return resolve(id);
+  };
+  await r.init();
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.doPlay({ id: A }, 0);
+  await wait(500); // ~10 polls
+  assert.deepEqual(resolves, [A, B], 'one attempt, then back off');
+  assert.ok(!fake.calls.some((c) => c.action === 'SetNextAVTransportURI'));
+
+  // When the song ends YouTube asks for it anyway: a normal load, not blocked by the backoff.
+  await r.doPlay({ id: B }, 0);
+  assert.deepEqual(resolves, [A, B, B]);
+  await r.destroy();
+});
+
+test('a renderer removed while a track is loading stays stopped', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => { await wait(200); return resolve(id); }; // slow yt-dlp
+  await r.init();
+  const play = r.doPlay({ id: A }, 0);
+  await wait(50);
+  await r.destroy(); // device went away (byebye / stale) mid-load
+  assert.equal(await play, false);
+  const calls = fake.calls.length;
+  await wait(300);
+  assert.equal(fake.calls.length, calls, 'no SOAP calls (polls, Play) after destroy');
+  assert.ok(!fake.calls.some((c) => c.action === 'SetAVTransportURI'));
+});
+
 test('per-renderer format override wins over the global setting and is persisted', async (t) => {
   const fake = await startFakeRenderer();
   t.after(() => fake.server.close());
