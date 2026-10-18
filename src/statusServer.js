@@ -3,6 +3,8 @@
 // DIAL/SSDP announcements: other VLAN, guest Wi-Fi, multicast-filtering APs).
 
 import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
 import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { recentLogs, onLog } from './logger.js';
@@ -42,6 +44,25 @@ function tokenOk(config, req, url) {
 }
 
 /**
+ * DNS rebinding: a web page can point its own domain at our LAN address. Its scripts are
+ * then "same origin" with us (Origin and Host both name that domain), so the CSRF check
+ * below can't tell, and they could read the history and logs or clear things. Only answer
+ * to names we know: IP addresses (which can't be rebound), localhost, this machine's name,
+ * and STATUS_HOSTS.
+ */
+export function hostOk(hostHeader, allowed) {
+  if (!hostHeader || allowed.has('*')) return true; // browsers always send Host
+  let name;
+  try {
+    name = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  name = name.replace(/^\[|\]$/g, '').replace(/\.$/, ''); // [::1], trailing-dot FQDN
+  return net.isIP(name) !== 0 || name === 'localhost' || allowed.has(name);
+}
+
+/**
  * Changes need a custom header (a cross-site page can't send one without a CORS
  * preflight, which we never approve) and, if the browser sends Origin, our own host.
  */
@@ -52,6 +73,9 @@ function csrfOk(req) {
 }
 
 export function startStatusServer(config, { renderers, mediaServer, settings, history = null }, log) {
+  const me = os.hostname().toLowerCase();
+  const allowedHosts = new Set([me, `${me}.local`, ...(config.statusHosts ?? []).map((h) => h.toLowerCase())]);
+  const warnedHosts = new Set();
   const routes = [
     ['GET', /^\/api\/status$/, async () => ({
       app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
@@ -123,6 +147,16 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     try {
+      if (!hostOk(req.headers.host, allowedHosts)) {
+        if (warnedHosts.size < 20 && !warnedHosts.has(req.headers.host)) {
+          warnedHosts.add(req.headers.host);
+          log.warn(`Refused a request for unknown host name "${req.headers.host}". If that's how you open `
+            + 'the status page, add it to STATUS_HOSTS.');
+        }
+        res.writeHead(403, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' })
+          .end('Unknown host name. Open the status page by IP address, or add this name to STATUS_HOSTS.\n');
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/healthz') {
         res.writeHead(200, SECURITY_HEADERS).end('ok');
         return;

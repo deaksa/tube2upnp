@@ -33,6 +33,7 @@ services:
       MEDIA_PORT: ${MEDIA_PORT:-8000}
       RECEIVER_BASE_PORT: ${RECEIVER_BASE_PORT:-3000}
       STATUS_BIND: ${STATUS_BIND:-}           # e.g. 127.0.0.1
+      STATUS_HOSTS: ${STATUS_HOSTS:-}         # extra names for the status page, e.g. tube.home.lan
       NAME_TEMPLATE: ${NAME_TEMPLATE:-}       # cast menu name; default "🔊 {name}"
       AUTOPLAY: ${AUTOPLAY:-true}
       START_TIMEOUT_MS: ${START_TIMEOUT_MS:-12000}

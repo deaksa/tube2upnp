@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startStatusServer } from '../src/statusServer.js';
+import http from 'node:http';
+import os from 'node:os';
+import { startStatusServer, hostOk } from '../src/statusServer.js';
 import { Logger, recentLogs } from '../src/logger.js';
 import { Settings } from '../src/settings.js';
 import { History } from '../src/history.js';
@@ -134,4 +136,47 @@ test('history endpoints answer 404 when HISTORY=false', async (t) => {
   assert.equal(res.status, 404);
   assert.match((await res.json()).error, /HISTORY=false/);
   assert.equal((await fetch(base + '/api/history.csv')).status, 404);
+});
+
+// fetch() can't set Host, so use http.request.
+const withHost = (base, pathname, host, method = 'GET') => new Promise((resolve, reject) => {
+  const req = http.request(base + pathname, { method, headers: { Host: host, 'X-Tube2upnp': '1' } }, (res) => {
+    res.resume();
+    res.on('end', () => resolve(res.statusCode));
+  });
+  req.on('error', reject);
+  req.end();
+});
+
+test('DNS rebinding: unknown host names are refused, IPs and known names work', async (t) => {
+  const { base, history } = await start(t);
+  history.record({ videoId: 'aaaaaaaaaaa', info: { title: 'Secret' }, udn: 'r1' });
+  // A page on evil.example re-pointed its domain at us: Host and Origin both say evil.example.
+  assert.equal(await withHost(base, '/api/history', 'evil.example:8080'), 403);
+  assert.equal(await withHost(base, '/api/history/clear', 'evil.example', 'POST'), 403);
+  assert.equal(await withHost(base, '/', 'evil.example'), 403);
+  assert.equal(history.recent().length, 1, 'nothing cleared');
+
+  for (const host of ['192.168.1.20:8080', '[::1]:8080', 'localhost:8080', 'LOCALHOST.',
+    os.hostname(), `${os.hostname()}.local:8080`]) {
+    assert.equal(await withHost(base, '/api/status', host), 200, host);
+  }
+});
+
+test('STATUS_HOSTS adds names; "*" allows any', async (t) => {
+  const { base } = await start(t, { statusHosts: ['Tube.Home.lan'] });
+  assert.equal(await withHost(base, '/api/status', 'tube.home.lan:8080'), 200);
+  assert.equal(await withHost(base, '/api/status', 'other.home.lan'), 403);
+  const any = await start(t, { statusHosts: ['*'] });
+  assert.equal(await withHost(any.base, '/api/status', 'whatever.example'), 200);
+});
+
+test('host check edge cases', () => {
+  const allowed = new Set(['nas']);
+  assert.equal(hostOk(undefined, allowed), true, 'HTTP/1.0 without Host');
+  assert.equal(hostOk('10.0.0.5', allowed), true);
+  assert.equal(hostOk('nas:8080', allowed), true);
+  assert.equal(hostOk('nas.evil.example', allowed), false);
+  assert.equal(hostOk('10.0.0.5.evil.example', allowed), false);
+  assert.equal(hostOk('bad host', allowed), false);
 });
