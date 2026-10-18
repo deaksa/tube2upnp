@@ -125,6 +125,8 @@ export class MediaServer {
   // ---------------------------------------------------------------- direct
 
   #proxy(req, res, entry, info, retry) {
+    // The renderer may have hung up while we resolved: don't open a request nobody reads.
+    if (res.destroyed) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const headers = { ...info.headers };
       if (req.headers.range) headers.Range = req.headers.range;
@@ -216,6 +218,9 @@ export class MediaServer {
         error = err.message;
         continue;
       }
+      // Hung up while we resolved or downloaded: an ffmpeg started now would block forever
+      // on a pipe nobody reads, since the 'close' that kills it has already happened.
+      if (res.destroyed) return;
       const r = await this.#runPipe([...args, ...outArgs, 'pipe:1'], res, headers);
       if (r.ok || r.bytes || res.destroyed) {
         if (!r.ok && !res.destroyed) this.log.warn(`ffmpeg stopped mid-stream for ${videoId}: ${r.error}`);
@@ -379,6 +384,7 @@ export class MediaServer {
 
   async #serveFile(req, res, format, file) {
     const { size } = await fsp.stat(file);
+    if (res.destroyed) return; // hung up while the file was being built
     const headers = { ...this.#headers(format, FORMATS[format].mime), 'Accept-Ranges': 'bytes' };
     const range = req.headers.range ? parseRange(req.headers.range, size) : null;
     if (range === 'invalid') {

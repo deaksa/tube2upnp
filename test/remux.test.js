@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MediaServer, parseRange } from '../src/mediaServer.js';
 import { Logger } from '../src/logger.js';
+import { stats } from '../src/stats.js';
 
 let hasFfmpeg = true;
 try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFfmpeg = false; }
@@ -157,6 +158,26 @@ test('adts/mp3: a stream that cannot be read at all is a 502, not an empty 200',
   });
   const { res } = await get({ videoId: 'kkkkkkkkkkk', format: 'mp3', ext: 'm4a' });
   assert.equal(res.status, 502);
+});
+
+test('a renderer that hangs up while the stream is being prepared leaves nothing running', { skip: !hasFfmpeg }, async (t) => {
+  const { ms } = await harness(t, {}, {
+    resolver: (base) => ({ resolve: async () => {
+      await new Promise((r) => setTimeout(r, 400)); // slow yt-dlp lookup
+      return { url: `${base}/s.m4a`, headers: {} };
+    } }),
+  });
+  for (const format of ['mp3', 'direct']) {
+    const path = ms.register({ videoId: 'lllllllllll', format, ext: 'm4a' });
+    const ac = new AbortController();
+    const req = fetch(`http://127.0.0.1:${ms.port}${path}`, { signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    ac.abort();
+    await req;
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(stats.gauges['ffmpeg.active'] ?? 0, 0, 'no ffmpeg left behind');
+  assert.equal(stats.gauges['http.active'] ?? 0, 0);
 });
 
 test('download retries with a fresh extraction after a 403', { skip: !hasFfmpeg }, async (t) => {
