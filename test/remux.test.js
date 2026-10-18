@@ -3,11 +3,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MediaServer, parseRange } from '../src/mediaServer.js';
 import { Logger } from '../src/logger.js';
+import { stats } from '../src/stats.js';
 
 let hasFfmpeg = true;
 try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFfmpeg = false; }
@@ -15,13 +16,14 @@ try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { hasFf
 const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
 
 let downloads = 0;
-async function harness(t, cfg = {}) {
+async function harness(t, cfg = {}, deps = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'remux-'));
   const src = path.join(dir, 'src.m4a');
   execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=60',
     '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', src]);
   const file = readFileSync(src);
   const up = http.createServer((req, res) => {
+    if (req.url.includes('forbidden')) return res.writeHead(403).end();
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? '');
     if (m) {
       const a = +m[1]; const b = m[2] ? +m[2] : file.length - 1;
@@ -31,15 +33,20 @@ async function harness(t, cfg = {}) {
     res.writeHead(200, { 'content-length': file.length, 'accept-ranges': 'bytes' }).end(file);
   });
   await new Promise((r) => up.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${up.address().port}`;
   const ms = new MediaServer(
     { mediaPort: 0, ffmpegPath: 'ffmpeg', mp3Bitrate: '128k', cacheDir: path.join(dir, 'cache'), cacheMb: 64, ...cfg },
-    { resolve: async () => ({ url: `http://127.0.0.1:${up.address().port}/s.m4a`, headers: { 'User-Agent': 'test' } }) },
+    {
+      resolve: async () => ({ url: `${base}/s.m4a`, headers: { 'User-Agent': 'test' } }),
+      invalidate: () => {},
+      ...deps.resolver?.(base),
+    },
     new Logger('none'),
     {
-      download: async (_id, info, dest) => {
+      download: deps.download ?? (async (_id, info, dest) => {
         downloads++;
         writeFileSync(dest, Buffer.from(await (await fetch(info.url)).arrayBuffer()));
-      },
+      }),
     });
   await ms.start();
   t.after(() => { ms.stop(); up.close(); });
@@ -50,7 +57,7 @@ async function harness(t, cfg = {}) {
     writeFileSync(out, Buffer.from(await res.arrayBuffer()));
     return { res, out };
   };
-  return { get, downloads: () => downloads };
+  return { get, downloads: () => downloads, ms, dir, src };
 }
 
 test('mp4: lossless remux to a non-fragmented, faststart MP4 with byte ranges', { skip: !hasFfmpeg }, async (t) => {
@@ -118,6 +125,86 @@ test('mp3 transcode', { skip: !hasFfmpeg }, async (t) => {
   const { res, out } = await get({ videoId: 'ddddddddddd', format: 'mp3', ext: 'm4a' });
   assert.equal(res.headers.get('content-type'), 'audio/mpeg');
   assert.equal(probe(out, 'stream=codec_name'), 'mp3');
+});
+
+test('adts/mp3: a refused YouTube URL is retried with a fresh extraction', { skip: !hasFfmpeg }, async (t) => {
+  let resolves = 0;
+  const { get } = await harness(t, {}, {
+    resolver: (base) => ({ resolve: async () => ({ url: `${base}/${resolves++ === 0 ? 'forbidden' : 's'}.m4a`, headers: {} }) }),
+  });
+  const { res, out } = await get({ videoId: 'iiiiiiiiiii', format: 'mp3', ext: 'm4a' });
+  assert.equal(res.status, 200);
+  assert.equal(probe(out, 'stream=codec_name'), 'mp3');
+  assert.equal(resolves, 2);
+});
+
+test('adts/mp3: falls back to the yt-dlp download when YouTube keeps refusing ffmpeg', { skip: !hasFfmpeg }, async (t) => {
+  let downloaded = 0;
+  const { get, src } = await harness(t, {}, {
+    resolver: (base) => ({ resolve: async () => ({ url: `${base}/forbidden.m4a`, headers: {} }) }),
+    download: async (_id, _info, dest) => { downloaded++; writeFileSync(dest, readFileSync(src)); },
+  });
+  const { res, out } = await get({ videoId: 'jjjjjjjjjjj', format: 'adts', ext: 'm4a', startAt: 30 });
+  assert.equal(res.status, 200);
+  assert.equal(probe(out, 'stream=codec_name'), 'aac');
+  assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 30) < 3);
+  assert.equal(downloaded, 1);
+});
+
+test('adts/mp3: a stream that cannot be read at all is a 502, not an empty 200', { skip: !hasFfmpeg }, async (t) => {
+  const { get } = await harness(t, { downloadRetryDelaysMs: [] }, {
+    resolver: (base) => ({ resolve: async () => ({ url: `${base}/forbidden.m4a`, headers: {} }) }),
+    download: async () => { throw new Error('download refused'); },
+  });
+  const { res } = await get({ videoId: 'kkkkkkkkkkk', format: 'mp3', ext: 'm4a' });
+  assert.equal(res.status, 502);
+});
+
+test('a renderer that hangs up while the stream is being prepared leaves nothing running', { skip: !hasFfmpeg }, async (t) => {
+  const { ms } = await harness(t, {}, {
+    resolver: (base) => ({ resolve: async () => {
+      await new Promise((r) => setTimeout(r, 400)); // slow yt-dlp lookup
+      return { url: `${base}/s.m4a`, headers: {} };
+    } }),
+  });
+  for (const format of ['mp3', 'direct']) {
+    const path = ms.register({ videoId: 'lllllllllll', format, ext: 'm4a' });
+    const ac = new AbortController();
+    const req = fetch(`http://127.0.0.1:${ms.port}${path}`, { signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    ac.abort();
+    await req;
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(stats.gauges['ffmpeg.active'] ?? 0, 0, 'no ffmpeg left behind');
+  assert.equal(stats.gauges['http.active'] ?? 0, 0);
+});
+
+test('cache: a file larger than CACHE_MB is still served; older files are evicted first', { skip: !hasFfmpeg }, async (t) => {
+  const { get, dir } = await harness(t, { cacheMb: 0 });
+  const cached = () => readdirSync(path.join(dir, 'cache')).sort();
+  const a = await get({ videoId: 'mmmmmmmmmmm', format: 'mp4', ext: 'm4a' });
+  assert.equal(a.res.status, 200);
+  assert.ok(probe(a.out, 'format=duration') > 59, 'complete file served');
+  await new Promise((r) => setTimeout(r, 200)); // eviction runs in the background
+  assert.deepEqual(cached(), ['mmmmmmmmmmm-mp4-0.m4a', 'mmmmmmmmmmm.source'], 'just built: kept');
+
+  const b = await get({ videoId: 'nnnnnnnnnnn', format: 'flac', ext: 'm4a' });
+  assert.equal(b.res.status, 200);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(cached(), ['nnnnnnnnnnn-flac-0.flac', 'nnnnnnnnnnn.source'], 'older track evicted');
+});
+
+test('cache: a file that vanished after it was built is built again', { skip: !hasFfmpeg }, async (t) => {
+  const { get, dir, downloads } = await harness(t);
+  const entry = { videoId: 'ooooooooooo', format: 'mp4', ext: 'm4a' };
+  await get(entry);
+  const before = downloads();
+  for (const f of readdirSync(path.join(dir, 'cache'))) rmSync(path.join(dir, 'cache', f)); // e.g. a tmp cleaner
+  const again = await get(entry);
+  assert.equal(again.res.status, 200);
+  assert.ok(probe(again.out, 'format=duration') > 59);
+  assert.equal(downloads() - before, 1, 'source downloaded again');
 });
 
 test('download retries with a fresh extraction after a 403', { skip: !hasFfmpeg }, async (t) => {
@@ -195,6 +282,25 @@ test('cache survives a restart; half-written files are dropped; clear works', { 
   assert.equal((await second.cacheInfo()).files, 0);
   await second.prepare(entry);
   assert.equal(downloads, 2, 'downloaded again after clearing');
+});
+
+test('clearing the cache keeps a file that is being played', { skip: !hasFfmpeg }, async (t) => {
+  // Bigger than the socket buffers (loopback send buffers grow to MBs), so the server is
+  // still sending when the cache is cleared.
+  const big = path.join(mkdtempSync(path.join(tmpdir(), 'big-')), 'big.m4a');
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=600',
+    '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', big]);
+  const { ms, dir } = await harness(t, {}, { download: async (_id, _info, dest) => writeFileSync(dest, readFileSync(big)) });
+  const entry = { videoId: 'ppppppppppp', format: 'mp4', ext: 'm4a' };
+  await ms.prepare(entry);
+  // A renderer mid-track: connected, reading slowly (here: not at all).
+  const req = http.get(`http://127.0.0.1:${ms.port}${ms.register(entry)}`);
+  const res = await new Promise((r) => req.on('response', r));
+  res.pause();
+  t.after(() => req.destroy());
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(await ms.clearCache(), 1, 'only the source is deleted');
+  assert.deepEqual(readdirSync(path.join(dir, 'cache')), ['ppppppppppp-mp4-0.m4a']);
 });
 
 test('range parsing', () => {

@@ -28,6 +28,7 @@ Running the actual service needs multicast on the LAN (SSDP/DIAL), so Docker Des
 **`Renderer` (src/renderer.js)** is the core. It extends yt-cast-receiver's `Player` and implements `doPlay/doPause/doResume/doStop/doSeek/doSetVolume/doGetPosition/...` by issuing SOAP calls to the device. Key points that span the file:
 - **Polling, not GENA eventing.** `#poll()` (every `POLL_INTERVAL_MS`) drives everything: end-of-track detection (calls `this.next()` to advance the YouTube queue), start-failure fallback to the next format, gapless-switch detection, next-track prefetch (`#maintainNext`), and SponsorBlock skips (`#checkSkip`).
 - **`#loadSeq`** invalidates stale async loads when the user skips quickly. Any new async path that loads media must check it after each await.
+- **`#destroyed`**: after `destroy()` (device gone), in-flight loads, prefetches and polls must not restart polling or touch the device.
 - **`#expectStop`** suppresses poll reactions while *we* are stopping or switching the renderer.
 - **Format selection:** per-renderer override (status page) → global `OUTPUT_FORMAT` → in `auto`, the learned format, else the first in `FALLBACK_CHAIN` the renderer's sink protocols accept. A format is "learned" (persisted) once the renderer reaches PLAYING.
 - **Gapless:** the next track is prepared via `#prepareItem` and sent with `SetNextAVTransportURI`. When the renderer's URI switches to the queued stream path, `#advanced` is set and `this.next()` is called. `doPlay` then *adopts* the track instead of reloading it.
@@ -35,8 +36,8 @@ Running the actual service needs multicast on the LAN (SSDP/DIAL), so Docker Des
 
 **`MediaServer` (src/mediaServer.js)** is one HTTP server for all renderers. `register(entry)` returns a short `/stream/<32-hex-token>.<ext>` path; unknown tokens get a 404 (it must never become an open proxy). Per format (`src/formats.js` is the single source of truth for formats, MIME types, DLNA flags and fallback order):
 - `direct`: proxies googlevideo with Range passthrough. It re-resolves once on 403/410.
-- `adts` / `mp3`: an ffmpeg pipe from the URL.
-- `mp4` / `flac` (`FILE_FORMATS`): yt-dlp downloads `<id>.source` into the disk cache, then ffmpeg builds `<id>-<format>-<startAt>.<ext>`. Served with byte ranges. Jobs are coalesced per key (`#once`). Writes go to `.download`/`.part` and are then renamed. The LRU prune uses mtime and `CACHE_MB`. `prepare()` builds the file *before* the renderer is told to play.
+- `adts` / `mp3`: an ffmpeg pipe from the URL. If YouTube refuses ffmpeg before any audio is sent, it retries with a fresh extraction, then from the yt-dlp download. Headers go out with the first audio byte, so a total failure is a 502.
+- `mp4` / `flac` (`FILE_FORMATS`): yt-dlp downloads `<id>.source` into the disk cache, then ffmpeg builds `<id>-<format>-<startAt>.<ext>`. Served with byte ranges. Jobs are coalesced per key (`#once`). Writes go to `.download`/`.part` and are then renamed. The LRU prune uses mtime (touched on every use) and `CACHE_MB`. Files being downloaded, built from or served are pinned (`#pin`), and the file just built is kept, so neither eviction nor `clearCache()` removes them. A file that vanished anyway is rebuilt. `prepare()` builds the file *before* the renderer is told to play.
 
 **`Resolver` (src/resolver.js)** runs yt-dlp via `execFile` (never a shell) with strict 11-char video-ID validation. It caches results until the URL's `expire` param, coalesces concurrent lookups, and schedules yt-dlp self-updates.
 

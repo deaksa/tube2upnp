@@ -9,6 +9,11 @@ import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './f
 import { fmt as fmtSec } from './sponsorblock.js';
 import { stats } from './stats.js';
 
+// A next track that can't be prepared (unavailable, age-restricted, 403s) is retried
+// after this long, doubling per failure - not on every poll.
+const PREFETCH_RETRY_MS = 30 * 1000;
+const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
+
 export class Renderer extends Player {
   #call;
   #receiver = null;
@@ -31,8 +36,10 @@ export class Renderer extends Player {
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
   #prefetching = false;
+  #prefetchFailures = new Map(); // videoId -> { count, until }
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
+  #destroyed = false;
 
   /**
    * @param {object} p
@@ -175,6 +182,12 @@ export class Renderer extends Player {
   }
 
   async destroy() {
+    // A load, prefetch or poll still in flight must not bring polling back afterwards.
+    this.#destroyed = true;
+    this.#loadSeq++;
+    this.#current = null;
+    this.#queued = null;
+    this.#advanced = null;
     this.#stopPolling();
     this.#resetSkips();
     try {
@@ -207,6 +220,7 @@ export class Renderer extends Player {
   // ---------------------------------------------------------------- Player impl
 
   async doPlay(video, position) {
+    if (this.#destroyed) return false;
     // A play request from YouTube starts a new listen. Our own reloads of the same track
     // (seek restart, format fallback) go straight to #load and keep counting.
     this.#listen = { videoId: video.id, playedMs: 0, lastTick: 0, counted: false };
@@ -250,7 +264,9 @@ export class Renderer extends Player {
 
       if (position > 1 && !item.current.startAt) {
         await this.#waitForState(['PLAYING'], 8000);
+        if (seq !== this.#loadSeq) return false;
         await this.#safeCall('AVTransport', 'Seek', { InstanceID: 0, Unit: 'REL_TIME', Target: hms(position) });
+        if (seq !== this.#loadSeq) return false;
       }
 
       this.#adopt(item, false);
@@ -428,17 +444,26 @@ export class Renderer extends Player {
       return;
     }
     if (this.#queued?.video.id === up.id) return;
+    const failed = this.#prefetchFailures.get(up.id);
+    if (failed && failed.until > Date.now()) return;
 
     this.#prefetching = true;
     try {
       const item = await this.#prepareItem(up, 0);
+      this.#prefetchFailures.delete(up.id);
+      if (this.#destroyed) return;
       // Queue or current track changed while we were preparing? Try again next poll.
       if (this.getUpcomingVideo()?.id !== up.id || this.#current?.video.id !== currentId) return;
       this.#queued = { video: up, item, sentToRenderer: false };
       this.log.info(`Prepared next track "${item.info.title}" (${item.format})`);
       await this.#sendNextToRenderer();
     } catch (err) {
-      this.log.warn(`Preparing next track ${up.id} failed: ${err.message}`);
+      const count = (failed?.count ?? 0) + 1;
+      const delay = Math.min(PREFETCH_RETRY_MS * 2 ** (count - 1), PREFETCH_RETRY_MAX_MS);
+      this.#prefetchFailures.delete(up.id); // re-insert: oldest entries are dropped first
+      this.#prefetchFailures.set(up.id, { count, until: Date.now() + delay });
+      while (this.#prefetchFailures.size > 50) this.#prefetchFailures.delete(this.#prefetchFailures.keys().next().value);
+      this.log.warn(`Preparing next track ${up.id} failed: ${err.message} - next try in ${Math.round(delay / 1000)} s`);
     } finally {
       this.#prefetching = false;
     }
@@ -703,6 +728,7 @@ export class Renderer extends Player {
   // subscriptions, and eventing needs an inbound callback port through NAT/firewalls.
   #startPolling() {
     this.#stopPolling();
+    if (this.#destroyed) return;
     this.#listen.lastTick = 0;
     this.#pollTimer = setInterval(() => {
       if (this.#polling) return; // a slow renderer must not stack up overlapping polls
@@ -721,7 +747,7 @@ export class Renderer extends Player {
     if (this.#expectStop) return;
     this.#polls++;
     const state = await this.#transportState();
-    if (!state) return;
+    if (!state || this.#destroyed) return;
     this.#transport = state;
     if (state !== 'PLAYING') this.#listen.lastTick = 0; // paused/buffering time doesn't count
     if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
@@ -742,6 +768,7 @@ export class Renderer extends Player {
         };
       }
     }
+    if (this.#destroyed) return;
 
     // If the renderer hasn't reached PLAYING well after Play, assume it can't handle
     // the stream (typically YouTube's fragmented DASH M4A) and retry as MP3.
