@@ -342,3 +342,21 @@ test('SponsorBlock off: no lookups, no seeks', async (t) => {
   assert.ok(!fake.calls.some((c) => c.action === 'Seek'));
   await r.destroy();
 });
+
+test('duration comes from the video, not a renderer still reporting the previous track', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake); // resolver stub: duration 210 s (3:30)
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+
+  // Renderer briefly still reports the previous, longer track (4:58 at 2:40).
+  Object.assign(fake.state, { trackDuration: '0:04:58', relTime: '0:02:40', reportedUri: 'http://192.168.0.85:8000/stream/' + 'f'.repeat(32) + '.m4a' });
+  assert.equal(await r.doGetDuration(), 210, 'video length, not the stale 4:58');
+  assert.equal(await r.doGetPosition(), 0, 'stale position ignored');
+
+  // Once it reports our stream, its position is used again.
+  Object.assign(fake.state, { reportedUri: undefined, relTime: '0:00:07' });
+  assert.equal(await r.doGetPosition(), 7);
+  await r.destroy();
+});

@@ -266,7 +266,7 @@ export class Renderer extends Player {
     const mime = mimeOf(format, info.mime);
     // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
     const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
-    const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false };
+    const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false, streamPath: null };
     const entry = {
       videoId: video.id, format, ext: info.ext, startAt,
       onRequest: () => {
@@ -276,6 +276,7 @@ export class Renderer extends Player {
     };
     await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
     const streamPath = this.media.register(entry);
+    current.streamPath = streamPath;
     const url = `http://${this.#ip}:${this.cfg.mediaPort}${streamPath}`;
     const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
     const metadata = buildDidl({
@@ -524,17 +525,28 @@ export class Renderer extends Player {
   }
 
   async doGetPosition() {
+    const c = this.#current;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+    // Right after a track change some renderers still report the previous track for a
+    // moment. If the renderer names a different stream than ours, its numbers aren't ours.
+    if (!r || this.#isStale(r.TrackURI)) return c?.startAt ?? 0;
     // The renderer counts from the start of the stream it got; add our ffmpeg offset.
-    return (r ? parseHms(r.RelTime) : 0) + (this.#current?.startAt ?? 0);
+    return parseHms(r.RelTime) + (c?.startAt ?? 0);
   }
 
   async doGetDuration() {
-    // For offset streams the renderer only knows the remaining length, if anything.
-    if (this.#current?.startAt && this.nowPlaying?.duration) return this.nowPlaying.duration;
+    // yt-dlp's duration is the video's real length. The renderer's TrackDuration can be
+    // the previous track's (right after a switch), the remaining part of an offset
+    // stream, or missing entirely, so it is only a fallback.
+    if (this.nowPlaying?.duration) return this.nowPlaying.duration;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
-    const d = r ? parseHms(r.TrackDuration) : 0;
-    return d || this.nowPlaying?.duration || 0;
+    return r && !this.#isStale(r.TrackURI) ? parseHms(r.TrackDuration) : 0;
+  }
+
+  /** Does the renderer report a stream other than the one we're playing? */
+  #isStale(trackUri) {
+    const ours = this.#current?.streamPath;
+    return Boolean(trackUri && ours && /^https?:/i.test(trackUri) && !trackUri.includes(ours));
   }
 
   // ------------------------------------------------------------------ internals
@@ -682,9 +694,12 @@ export class Renderer extends Player {
           uri = (await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 }))?.CurrentURI;
         }
         const startAt = this.#current?.startAt ?? 0;
+        // Keep the URI even when it isn't ours (that's how a gapless switch is noticed),
+        // but don't take position/duration from a renderer still on the previous track.
+        const stale = this.#isStale(uri);
         this.#position = {
-          rel: parseHms(r.RelTime) + startAt,
-          dur: this.nowPlaying?.duration || parseHms(r.TrackDuration),
+          rel: stale ? (this.#position?.rel ?? startAt) : parseHms(r.RelTime) + startAt,
+          dur: this.nowPlaying?.duration || (stale ? 0 : parseHms(r.TrackDuration)),
           uri, at: Date.now(),
         };
       }

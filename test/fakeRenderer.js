@@ -70,7 +70,7 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         if (action === 'Stop') state.transport = 'STOPPED';
         if (action === 'Pause') state.transport = 'PAUSED_PLAYBACK';
         if (action === 'GetTransportInfo') out = `<CurrentTransportState>${state.transport}</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>`;
-        if (action === 'GetPositionInfo') out = `<TrackDuration>0:03:30</TrackDuration><TrackURI>${state.currentUri}</TrackURI><RelTime>0:01:05</RelTime>`;
+        if (action === 'GetPositionInfo') out = `<TrackDuration>${state.trackDuration ?? '0:03:30'}</TrackDuration><TrackURI>${state.reportedUri ?? state.currentUri}</TrackURI><RelTime>${state.relTime ?? '0:01:05'}</RelTime>`;
         if (action === 'GetMediaInfo') out = `<CurrentURI>${state.currentUri}</CurrentURI>`;
         if (action === 'GetVolume') out = `<CurrentVolume>${state.volume}</CurrentVolume>`;
         if (action === 'GetProtocolInfo') out = `<Source></Source><Sink>${sink}</Sink>`;
