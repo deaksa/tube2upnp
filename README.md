@@ -106,7 +106,7 @@ yt-dlp needs a JavaScript runtime to solve YouTube's challenges. Tube2U[PnP] pas
 
 ## Configuration (environment variables)
 
-With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common ones through. When running without Docker, set them as normal environment variables.
+With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all through, except `CACHE_DIR`, `DATA_DIR` and the yt-dlp paths and runtime, which the image sets. When running without Docker, set them as normal environment variables.
 
 | Variable | Default | Purpose |
 |---|---|---|

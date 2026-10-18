@@ -29,6 +29,17 @@ services:
       STATUS_TOKEN: ${STATUS_TOKEN:-}         # optional: require ?token=… on the status page
       MEDIA_PORT: ${MEDIA_PORT:-8000}
       RECEIVER_BASE_PORT: ${RECEIVER_BASE_PORT:-3000}
+      STATUS_BIND: ${STATUS_BIND:-}           # e.g. 127.0.0.1
+      NAME_TEMPLATE: ${NAME_TEMPLATE:-}       # cast menu name; default "🔊 {name}"
+      AUTOPLAY: ${AUTOPLAY:-true}
+      START_TIMEOUT_MS: ${START_TIMEOUT_MS:-12000}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-2000}
+      DISCOVERY_INTERVAL: ${DISCOVERY_INTERVAL:-300}
+      SPONSORBLOCK_API: ${SPONSORBLOCK_API:-}
+      YTDLP_FORMAT: ${YTDLP_FORMAT:-}
+      YTDLP_EXTRA_ARGS: ${YTDLP_EXTRA_ARGS:-} # e.g. --cookies /data/cookies.txt
+      YTDLP_UPDATE_HOURS: ${YTDLP_UPDATE_HOURS:-24}
+      YTDLP_UPDATE_ON_START: ${YTDLP_UPDATE_ON_START:-true}
 
 volumes:
   tube2upnp-data:
