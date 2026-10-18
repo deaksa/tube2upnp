@@ -9,6 +9,11 @@ import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './f
 import { fmt as fmtSec } from './sponsorblock.js';
 import { stats } from './stats.js';
 
+// A next track that can't be prepared (unavailable, age-restricted, 403s) is retried
+// after this long, doubling per failure - not on every poll.
+const PREFETCH_RETRY_MS = 30 * 1000;
+const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
+
 export class Renderer extends Player {
   #call;
   #receiver = null;
@@ -30,6 +35,7 @@ export class Renderer extends Player {
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
   #prefetching = false;
+  #prefetchFailures = new Map(); // videoId -> { count, until }
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
 
@@ -392,17 +398,25 @@ export class Renderer extends Player {
       return;
     }
     if (this.#queued?.video.id === up.id) return;
+    const failed = this.#prefetchFailures.get(up.id);
+    if (failed && failed.until > Date.now()) return;
 
     this.#prefetching = true;
     try {
       const item = await this.#prepareItem(up, 0);
+      this.#prefetchFailures.delete(up.id);
       // Queue or current track changed while we were preparing? Try again next poll.
       if (this.getUpcomingVideo()?.id !== up.id || this.#current?.video.id !== currentId) return;
       this.#queued = { video: up, item, sentToRenderer: false };
       this.log.info(`Prepared next track "${item.info.title}" (${item.format})`);
       await this.#sendNextToRenderer();
     } catch (err) {
-      this.log.warn(`Preparing next track ${up.id} failed: ${err.message}`);
+      const count = (failed?.count ?? 0) + 1;
+      const delay = Math.min(PREFETCH_RETRY_MS * 2 ** (count - 1), PREFETCH_RETRY_MAX_MS);
+      this.#prefetchFailures.delete(up.id); // re-insert: oldest entries are dropped first
+      this.#prefetchFailures.set(up.id, { count, until: Date.now() + delay });
+      while (this.#prefetchFailures.size > 50) this.#prefetchFailures.delete(this.#prefetchFailures.keys().next().value);
+      this.log.warn(`Preparing next track ${up.id} failed: ${err.message} - next try in ${Math.round(delay / 1000)} s`);
     } finally {
       this.#prefetching = false;
     }
