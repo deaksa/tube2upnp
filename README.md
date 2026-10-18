@@ -155,6 +155,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes the common
 
 **yt-dlp errors ("Sign in to confirm you're not a bot", HTTP 403).**
 - Occasional `HTTP Error 403` on download is normal. YouTube sometimes hands out a format URL it then refuses to serve. Tube2U[PnP] discards it and retries with a fresh lookup (two retries, after 2 s and 5 s), which almost always succeeds.
+- With `adts` and `mp3`, ffmpeg reads YouTube's stream itself. If YouTube refuses it, Tube2U[PnP] retries with a fresh lookup, then falls back to downloading the track with yt-dlp first (the stream then starts a few seconds later).
 - If 403s happen on most tracks:
   - Update yt-dlp first. This happens automatically by default.
   - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.

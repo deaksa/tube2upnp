@@ -164,34 +164,96 @@ export class MediaServer {
 
   // ------------------------------------------------------------ ffmpeg common
 
-  async #inputArgs(entry) {
-    const info = await this.resolver.resolve(entry.videoId);
+  #urlInputArgs(info, startAt) {
     const hdrs = Object.entries(info.headers ?? {}).map(([k, v]) => `${k}: ${v}\r\n`).join('');
     return [
       '-hide_banner', '-loglevel', 'error',
       ...(hdrs ? ['-headers', hdrs] : []),
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
       // Input-side -ss: ffmpeg range-requests from the offset instead of reading from 0.
-      ...(entry.startAt > 0 ? ['-ss', String(entry.startAt)] : []),
+      ...(startAt > 0 ? ['-ss', String(startAt)] : []),
       '-i', info.url, '-vn',
     ];
   }
 
+  #fileInputArgs(file, startAt) {
+    return ['-hide_banner', '-loglevel', 'error', ...(startAt > 0 ? ['-ss', String(startAt)] : []), '-i', file, '-vn'];
+  }
+
   // ---------------------------------------------------------- adts / mp3 pipes
 
+  // ffmpeg reads YouTube's URL itself so the stream starts at once. YouTube may refuse
+  // that URL (403: expired, or a format URL it won't serve to ffmpeg), so fall back to a
+  // fresh extraction, then to yt-dlp's own download - slower to start, but it is what
+  // mp4/flac rely on. Headers go out with the first audio byte, so until then a failed
+  // attempt can still be retried, and a complete failure is a 502, not an empty 200.
   async #pipe(req, res, entry, outArgs) {
-    const args = [...await this.#inputArgs(entry), ...outArgs, 'pipe:1'];
-    res.writeHead(200, this.#headers(entry.format, FORMATS[entry.format].mime));
-    if (req.method === 'HEAD') return res.end();
+    const headers = this.#headers(entry.format, FORMATS[entry.format].mime);
+    if (req.method === 'HEAD') return res.writeHead(200, headers).end();
 
-    const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    stats.gauge('ffmpeg.active', 1);
-    ff.on('close', () => stats.gauge('ffmpeg.active', -1));
-    ff.stdout.on('data', (c) => stats.inc('http.bytes', c.length));
-    ff.stdout.pipe(res);
-    ff.stderr.on('data', (d) => this.log.debug('ffmpeg:', d.toString().trim()));
-    ff.on('error', (err) => { this.log.error('ffmpeg failed to start:', err.message); res.destroy(); });
-    res.on('close', () => ff.kill('SIGKILL'));
+    const { videoId, startAt } = entry;
+    const attempts = [
+      ['YouTube URL', async () => this.#urlInputArgs(await this.resolver.resolve(videoId), startAt)],
+      ['a fresh extraction', async () => {
+        this.resolver.invalidate(videoId);
+        return this.#urlInputArgs(await this.resolver.resolve(videoId), startAt);
+      }],
+      ['the yt-dlp download', async () => this.#fileInputArgs(await this.#sourceFile(videoId), startAt)],
+    ];
+    // Source already downloaded (e.g. mp4 was tried before): no need to ask YouTube.
+    if (this.#downloadJobs.has(videoId)) attempts.unshift(attempts.pop());
+
+    let error;
+    for (const [i, [, input]] of attempts.entries()) {
+      if (i > 0) {
+        this.log.warn(`ffmpeg could not read ${videoId} (${error}) - retrying with ${attempts[i][0]}`);
+        stats.inc('pipe.retries');
+      }
+      let args;
+      try {
+        args = await input();
+      } catch (err) {
+        error = err.message;
+        continue;
+      }
+      const r = await this.#runPipe([...args, ...outArgs, 'pipe:1'], res, headers);
+      if (r.ok || r.bytes || res.destroyed) {
+        if (!r.ok && !res.destroyed) this.log.warn(`ffmpeg stopped mid-stream for ${videoId}: ${r.error}`);
+        res.end();
+        return;
+      }
+      error = r.error;
+    }
+    stats.inc('pipe.failed');
+    throw new Error(`ffmpeg could not stream ${videoId}: ${error}`);
+  }
+
+  /** Run one ffmpeg into `res`; resolves when it exits, with how many bytes it sent. */
+  #runPipe(args, res, headers) {
+    return new Promise((resolve) => {
+      const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      stats.gauge('ffmpeg.active', 1);
+      let bytes = 0;
+      let err = '';
+      ff.stdout.on('data', (c) => {
+        if (!res.headersSent) res.writeHead(200, headers);
+        bytes += c.length;
+        stats.inc('http.bytes', c.length);
+      });
+      ff.stdout.pipe(res, { end: false });
+      ff.stderr.on('data', (d) => {
+        this.log.debug('ffmpeg:', d.toString().trim());
+        err = (err + d).slice(-2000);
+      });
+      ff.on('error', (e) => { err ||= `ffmpeg failed to start: ${e.message}`; });
+      const kill = () => ff.kill('SIGKILL');
+      res.on('close', kill);
+      ff.on('close', (code) => {
+        res.off('close', kill);
+        stats.gauge('ffmpeg.active', -1);
+        resolve({ ok: code === 0, bytes, error: err.trim().split('\n').pop() || `exit code ${code}` });
+      });
+    });
   }
 
   // ------------------------------------------------------- mp4 / flac (file)
