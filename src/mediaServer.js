@@ -7,7 +7,6 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -47,8 +46,9 @@ export class MediaServer {
     this.download = opts.download
       ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
     // Default: under DATA_DIR, so the cache survives restarts (and the Docker data volume
-    // keeps it), and it isn't a predictable path in a shared temp folder.
-    this.cacheDir = config.cacheDir ?? path.join(config.dataDir ?? os.tmpdir(), 'cache');
+    // keeps it). Never the shared temp folder: other local users could read or pre-create
+    // files at a predictable path there.
+    this.cacheDir = config.cacheDir ?? path.join(config.dataDir ?? './data', 'cache');
   }
 
   async start() {

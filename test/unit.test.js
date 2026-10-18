@@ -59,3 +59,29 @@ test('resolver rejects IDs that could be used for injection', async () => {
   await assert.rejects(r.resolve('abc; rm -rf /'), /invalid video ID/);
   await assert.rejects(r.resolve('--exec=evil'), /invalid video ID/);
 });
+
+test('yt-dlp info JSON is private and never written through a planted symlink', { skip: process.platform === 'win32' }, async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, symlinkSync, chmodSync, existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { downloadWithYtdlp } = await import('../src/resolver.js');
+  const dir = mkdtempSync(path.join(tmpdir(), 'ytdlp-'));
+  // Fake yt-dlp: records the info JSON's permissions, then "downloads" to -o.
+  const fake = path.join(dir, 'yt-dlp');
+  writeFileSync(fake, '#!/bin/sh\nwhile [ "$1" != "-o" ]; do\n  [ "$1" = "--load-info-json" ] && stat -c %a "$2" > "$DIR/mode"\n  shift\ndone\necho audio > "$2"\n');
+  chmodSync(fake, 0o755);
+  process.env.DIR = dir;
+  const config = { ytdlpPath: fake, ytdlpFormat: 'bestaudio', ytdlpJsRuntime: '', ytdlpExtraArgs: [] };
+  const info = { formatId: '140' };
+  Object.defineProperty(info, 'rawJson', { value: '{"id":"x"}' });
+
+  const dest = path.join(dir, 'aaaaaaaaaaa.source');
+  const victim = path.join(dir, 'victim');
+  writeFileSync(victim, 'keep me');
+  symlinkSync(victim, `${dest}.info.json`); // planted before the download
+  await downloadWithYtdlp(config, null, 'aaaaaaaaaaa', info, dest);
+  assert.equal(readFileSync(path.join(dir, 'mode'), 'utf8').trim(), '600');
+  assert.equal(readFileSync(victim, 'utf8'), 'keep me', 'symlink target untouched');
+  assert.equal(readFileSync(dest, 'utf8').trim(), 'audio');
+  assert.ok(!existsSync(`${dest}.info.json`), 'removed afterwards');
+});
