@@ -20,7 +20,12 @@ export class PortRegistry {
 
   async load() {
     try {
-      this.#saved = JSON.parse(await fs.readFile(this.#file, 'utf8'));
+      const data = JSON.parse(await fs.readFile(this.#file, 'utf8'));
+      // Valid JSON can still be the wrong shape (null, [], a hand edit); claim() would then
+      // throw for every speaker and none of them would come up.
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not a JSON object');
+      this.#saved = Object.fromEntries(Object.entries(data)
+        .filter(([, p]) => Number.isInteger(p) && p > 0 && p < 65536));
     } catch (err) {
       if (err.code !== 'ENOENT') this.log.warn(`Ignoring unreadable ${this.#file}: ${err.message}`);
       this.#saved = {};

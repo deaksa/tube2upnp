@@ -56,6 +56,16 @@ test('tolerates a corrupt ports.json', async () => {
   assert.equal(r.claim('a'), 3000);
 });
 
+test('ignores a ports.json of the wrong shape, and entries that are not ports', async () => {
+  for (const content of ['null', '[]', '"3000"', '{"a":"3005","b":3001.5,"c":70000,"d":3002}']) {
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'ports-'));
+    writeFileSync(path.join(dataDir, 'ports.json'), content);
+    const r = await make(dataDir).load();
+    assert.equal(r.claim('a'), 3000, content);
+    assert.equal(r.claim('d'), content.includes('"d"') ? 3002 : 3001, content);
+  }
+});
+
 test('speakers coming up at the same time are all saved without write errors', async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'ports-'));
   const warnings = [];
