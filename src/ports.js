@@ -10,6 +10,7 @@ export class PortRegistry {
   #file;
   #saved = {};
   #inUse = new Set();
+  #writing = Promise.resolve();
 
   constructor(config, logger) {
     this.base = config.receiverBasePort;
@@ -42,9 +43,15 @@ export class PortRegistry {
   }
 
   /** Persist the port once the renderer is up, so devices that get filtered out don't reserve one. */
-  async remember(udn, port) {
-    if (this.#saved[udn] === port) return;
+  remember(udn, port) {
+    if (this.#saved[udn] === port) return this.#writing;
     this.#saved[udn] = port;
+    // Several speakers come up at once; writes share one temp file, so run them one at a time.
+    this.#writing = this.#writing.then(() => this.#save());
+    return this.#writing;
+  }
+
+  async #save() {
     try {
       await fs.mkdir(path.dirname(this.#file), { recursive: true });
       const tmp = `${this.#file}.tmp`;

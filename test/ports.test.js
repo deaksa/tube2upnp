@@ -55,3 +55,13 @@ test('tolerates a corrupt ports.json', async () => {
   const r = await make(dataDir).load();
   assert.equal(r.claim('a'), 3000);
 });
+
+test('speakers coming up at the same time are all saved without write errors', async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'ports-'));
+  const warnings = [];
+  const r = await new PortRegistry({ dataDir, receiverBasePort: 3000 }, { warn: (m) => warnings.push(m) }).load();
+  const udns = ['kitchen', 'lamp', 'deck', 'family'];
+  await Promise.all(udns.map((u) => r.remember(u, r.claim(u))));
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(dataDir, 'ports.json'), 'utf8')), { kitchen: 3000, lamp: 3001, deck: 3002, family: 3003 });
+});
