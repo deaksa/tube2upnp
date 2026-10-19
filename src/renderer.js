@@ -802,7 +802,7 @@ export class Renderer extends Player {
       name: this.name,
       friendlyName: this.description?.friendlyName ?? null,
       manufacturer: this.description?.manufacturer ?? '',
-      model: [this.description?.modelName, this.description?.modelNumber].filter(Boolean).join(' '),
+      model: modelText(this.description),
       address: this.address,
       advertisedIp: this.#ip,
       dialPort: this.port,
@@ -978,6 +978,13 @@ export class Renderer extends Player {
 }
 
 /** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
+/** "RX-V4A", not "RX-V4A V4A": some devices repeat the model number in the name. */
+function modelText(desc) {
+  const name = desc?.modelName ?? '';
+  const number = desc?.modelNumber ?? '';
+  return number && !name.includes(number) ? [name, number].filter(Boolean).join(' ') : name;
+}
+
 function sourceOf(uri) {
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri ?? '')?.[1]?.toLowerCase();
   if (!scheme) return null;

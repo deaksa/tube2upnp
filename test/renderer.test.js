@@ -618,6 +618,7 @@ test('Yamaha Extended Control: input, what plays on it, standby, master volume i
   let info = r.statusInfo();
   assert.equal(info.external, null, 'the server input is ours to watch over UPnP');
   assert.equal(info.power, 'on');
+  assert.equal(info.model, 'Speaker 1', 'the model number is not repeated when the name has it (RX-V4A V4A)');
   assert.deepEqual(info.volume, { level: 7, raw: 12, min: 0, max: 161, muted: false, rangeKnown: true, db: -74.5 },
     'the master volume as the display shows it, not RenderingControl (30)');
 
