@@ -537,16 +537,21 @@ export class Renderer extends Player {
   }
 
   async doStop() {
+    // yt-cast-receiver's play() stops a PLAYING player first. If the renderer has already moved on
+    // to the queued track by itself (gapless), that stop must not reach the device or forget the
+    // switch, or doPlay() could not adopt the track: it would be cut off and reloaded from 0.
+    // doPlay() adopts it, or #load stops the renderer itself when something else is to play.
+    const switching = this.#advanced;
     this.#loadSeq++; // cancel any pending load
     this.#resetSkips();
     this.#position = null;
     this.#transport = 'STOPPED';
     this.#current = null;
     this.#queued = null;
-    this.#advanced = null;
+    this.#advanced = switching;
     this.#stopPolling();
     this.#expectStop = true;
-    const ok = await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
+    const ok = switching ? true : await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
     this.nowPlaying = null;
     return ok;
   }
@@ -792,7 +797,11 @@ export class Renderer extends Player {
         this.#advanced = this.#queued;
         this.#queued = null;
         this.log.info('Renderer continued into the next track');
-        if (!(await this.next())) this.#advanced = null;
+        if (!(await this.next())) {
+          this.#advanced = null;
+          // Queue ended (the stop above skipped the device): stop the track it played on into.
+          if (this.status === PLAYER_STATUSES.STOPPED) await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
+        }
         return;
       }
       this.#maintainNext().catch(() => {}); // background: don't hold up polling
