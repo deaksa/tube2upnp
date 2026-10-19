@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM node:22-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:22-alpine
+FROM node:24-alpine
 # ffmpeg: optional MP3 transcoding for picky renderers. tini: reaps ffmpeg children, forwards signals.
 RUN apk add --no-cache python3 ffmpeg tini \
  && python3 -m venv /opt/yt-dlp \

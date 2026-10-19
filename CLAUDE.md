@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Tube2U[PnP] (package `tube2upnp`): a Node.js (ESM, Node ≥20, CI uses 22) service that discovers UPnP/DLNA MediaRenderers on the LAN and exposes each one as a YouTube cast receiver (via `yt-cast-receiver` 2.x). yt-dlp resolves video IDs; ffmpeg remuxes/transcodes. Fork of upnpTube; the README is the user-facing spec for behaviour and all env vars.
+Tube2U[PnP] (package `tube2upnp`): a Node.js (ESM, Node ≥22, CI and Docker use 24) service that discovers UPnP/DLNA MediaRenderers on the LAN and exposes each one as a YouTube cast receiver (via `yt-cast-receiver` 2.x). yt-dlp resolves video IDs; ffmpeg remuxes/transcodes. Fork of upnpTube; the README is the user-facing spec for behaviour and all env vars.
 
 ## Commands
 
@@ -45,7 +45,7 @@ Running the actual service needs multicast on the LAN (SSDP/DIAL), so Docker Des
 
 **Persistence:** `dataStore.js` gives each renderer its own node-persist dir under `DATA_DIR`, because the library's default store is shared and casts would land on the wrong speaker. Per-renderer keys are `tube2upnp.*`, with read fallback to legacy `upnptube.*`. `settings.js` stores status-page overrides (currently SponsorBlock) in `DATA_DIR/settings.json`; these win over env until reset. `history.js` keeps playback history in `DATA_DIR/history.json`, with serialized, coalesced atomic writes. `Renderer.#countListen()` (called from `#poll`) records a play after `HISTORY_MIN_PLAY_S` of real PLAYING time. `#listen` is reset only in `doPlay`, so internal `#load` reloads (seek restart, format fallback) never double-count.
 
-**Status page:** `statusServer.js` serves the single-file UI `src/ui/index.html` (inline JS/CSS, strict CSP) plus a JSON API and `/healthz`. It supports an optional `STATUS_TOKEN` and CSRF protection on mutating requests. Data comes from `Renderer.statusInfo()`, the global `stats` singleton (`stats.js`), and the in-memory log ring in `logger.js` (2000 lines). `Logger` also implements yt-cast-receiver's logger interface.
+**Status page:** `statusServer.js` serves the single-file UI `src/ui/index.html` (inline JS/CSS, strict CSP) plus a JSON API and `/healthz`. It supports an optional `STATUS_TOKEN`, CSRF protection on mutating requests, and a Host check against DNS rebinding (IPs, localhost, this host's name, `STATUS_HOSTS`). Data comes from `Renderer.statusInfo()`, the global `stats` singleton (`stats.js`), and the in-memory log ring in `logger.js` (2000 lines). `Logger` also implements yt-cast-receiver's logger interface.
 
 **Config:** everything comes from env vars, parsed and validated once in `src/config.js` into a frozen object. A new option needs updating in `config.js`, the README table, and, if commonly used, `docker-compose.yml` / `.env.example`.
 

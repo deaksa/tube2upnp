@@ -40,6 +40,9 @@ export const config = Object.freeze({
   // Optional: address to bind the status page to (e.g. 127.0.0.1), and a token it requires.
   statusBind: str('STATUS_BIND', null),
   statusToken: str('STATUS_TOKEN', null),
+  // Extra host names the status page answers to, besides IP addresses, localhost and this
+  // machine's name (DNS rebinding protection). "*" allows any.
+  statusHosts: str('STATUS_HOSTS', '').split(',').map((h) => h.trim()).filter(Boolean),
 
   // IP address renderers should use to reach us. Auto-detected per renderer if unset.
   advertiseIp: str('ADVERTISE_IP', null),

@@ -97,9 +97,11 @@ Open `http://<host>:8080/` in a browser. It has five views:
 
 The page is meant for your LAN. If other people or devices share that network, set `STATUS_TOKEN` and open the page as `/?token=<token>`. You can also limit it to one address with `STATUS_BIND`, or turn it off with `STATUS_PORT=0`. Requests that change settings must come from the page itself, so other websites can't send them from your browser.
 
+The page only answers when it's opened by IP address, as `localhost`, or by this machine's name (`<hostname>` or `<hostname>.local`). This stops other websites from reaching it through a DNS trick (DNS rebinding). If you open it by another name, for example through a reverse proxy or your router's DNS, add that name to `STATUS_HOSTS`. Otherwise you'll get "Unknown host name".
+
 ## Running without Docker
 
-You need Node.js 20 or later (22 recommended), yt-dlp, and optionally ffmpeg.
+You need Node.js 22 or later (24 recommended), yt-dlp, and optionally ffmpeg.
 
 ```sh
 pip install -U "yt-dlp[default]"   # [default] pulls in yt-dlp-ejs, needed for YouTube
@@ -124,6 +126,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `STATUS_PORT` | `8080` | Status page. `0` disables it. |
 | `STATUS_TOKEN` | – | If set, the status page's API requires this token (open the page as `/?token=…`) |
 | `STATUS_BIND` | all interfaces | Address the status page listens on, e.g. `127.0.0.1` |
+| `STATUS_HOSTS` | – | Extra host names the status page may be opened by, comma-separated (e.g. `tube.home.lan`). IP addresses, `localhost` and this machine's name always work. `*` allows any name (turns off the DNS rebinding check). |
 | `RENDERER_INCLUDE` / `RENDERER_EXCLUDE` | – | Case-insensitive regex on the renderer's friendly name |
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
@@ -188,7 +191,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page:** now playing, per-speaker format setting, live logs, stats for nerds, pairing codes. JSON API and `/healthz`, optional token, CSRF protection.
-- **Packaging:** Node 22 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
+- **Packaging:** Node 24 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
 
 ## CI (GitHub Actions)
 
