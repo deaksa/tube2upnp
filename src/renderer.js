@@ -2,7 +2,7 @@
 
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
-import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
+import { fetchDescription, fetchVolumeRange, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
@@ -32,6 +32,8 @@ export class Renderer extends Player {
   #sb = { videoId: null, segments: [], skipped: new Set(), loading: false, timer: null };
   #listen = { videoId: null, playedMs: 0, lastTick: 0, counted: false }; // for the play history
   #polls = 0;
+  #volume = null;          // { raw, muted } last read from the renderer, for the status page
+  #volumeRange = null;     // { min, max } of its Volume variable (SCPD), when it says
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -134,6 +136,11 @@ export class Renderer extends Player {
     } catch (err) {
       this.log.debug('GetProtocolInfo failed (will assume source format works):', err.message);
     }
+
+    // UPnP leaves the volume scale to the device (0-100 is common, not universal).
+    this.#volumeRange = await fetchVolumeRange(desc.services['urn:upnp-org:serviceId:RenderingControl']?.SCPDURL)
+      .catch(() => null);
+    await this.refreshVolume();
 
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
@@ -575,15 +582,36 @@ export class Renderer extends Player {
     // SetMute is optional in RenderingControl; don't fail the whole call if absent.
     await this.#safeCall('RenderingControl', 'SetMute',
       { InstanceID: 0, Channel: 'Master', DesiredMute: volume.muted ? 1 : 0 });
+    if (okLevel) this.#volume = { raw: Math.round(volume.level), muted: Boolean(volume.muted) };
     return okLevel;
   }
 
   async doGetVolume() {
     const r = await this.#safeCall('RenderingControl', 'GetVolume', { InstanceID: 0, Channel: 'Master' });
     const m = await this.#safeCall('RenderingControl', 'GetMute', { InstanceID: 0, Channel: 'Master' });
-    return {
+    const v = {
       level: r ? Number.parseInt(r.CurrentVolume, 10) || 0 : 50,
       muted: m ? ['1', 'true'].includes(String(m.CurrentMute).toLowerCase()) : false,
+    };
+    if (r) this.#volume = { raw: v.level, muted: v.muted };
+    return v;
+  }
+
+  /** Read the volume for the status page (the device checks call this; so does playback polling). */
+  async refreshVolume() {
+    await this.doGetVolume();
+    return this.#volume;
+  }
+
+  /** Volume as a percentage of the device's own range. */
+  #volumeInfo() {
+    const v = this.#volume;
+    if (!v) return null;
+    const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
+    const clamped = Math.min(max, Math.max(min, v.raw));
+    return {
+      level: Math.round(((clamped - min) / (max - min)) * 100), raw: v.raw, min, max, muted: v.muted,
+      rangeKnown: Boolean(this.#volumeRange),
     };
   }
 
@@ -675,6 +703,7 @@ export class Renderer extends Player {
       sink: (this.#protocols ?? []).map((x) => x.contentFormat).filter(Boolean),
       soap: { ...this.#soap, avgMs: this.#soap.calls ? Math.round(this.#soap.totalMs / this.#soap.calls) : null },
       polls: this.#polls,
+      volume: this.#volumeInfo(),
       lastSeenS: Math.round((Date.now() - this.lastSeen) / 1000),
     };
   }
@@ -752,6 +781,8 @@ export class Renderer extends Player {
     if (!state || this.#destroyed) return;
     this.#transport = state;
     if (state !== 'PLAYING') this.#listen.lastTick = 0; // paused/buffering time doesn't count
+    // A knob or remote can change the volume during playback; keep the status page close behind.
+    if (state === 'PLAYING' && this.#polls % 3 === 0) this.refreshVolume().catch(() => {});
     if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
       const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
       if (r) {

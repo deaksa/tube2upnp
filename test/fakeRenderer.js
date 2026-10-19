@@ -17,20 +17,25 @@ const ACTIONS = {
   RenderingControl: {
     GetVolume: [['InstanceID', 'in'], ['Channel', 'in'], ['CurrentVolume', 'out']],
     SetVolume: [['InstanceID', 'in'], ['Channel', 'in'], ['DesiredVolume', 'in']],
+    GetMute: [['InstanceID', 'in'], ['Channel', 'in'], ['CurrentMute', 'out']],
   },
   ConnectionManager: {
     GetProtocolInfo: [['Source', 'out'], ['Sink', 'out']],
   },
 };
 
-const scpd = (svc) => `<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:service-1-0"><actionList>${
+const scpd = (svc, volumeRange) => `<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:service-1-0"><actionList>${
   Object.entries(ACTIONS[svc]).map(([a, args]) => `<action><name>${a}</name><argumentList>${
     args.map(([n, d]) => `<argument><name>${n}</name><direction>${d}</direction></argument>`).join('')
-  }</argumentList></action>`).join('')}</actionList></scpd>`;
+  }</argumentList></action>`).join('')}</actionList>${svc === 'RenderingControl' && volumeRange
+  ? '<serviceStateTable><stateVariable sendEvents="no"><name>Mute</name><dataType>boolean</dataType></stateVariable>'
+    + `<stateVariable sendEvents="no"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>${volumeRange[0]}</minimum>`
+    + `<maximum>${volumeRange[1]}</maximum><step>1</step></allowedValueRange></stateVariable></serviceStateTable>` : ''}</scpd>`;
 
-export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [], noGapless = false, port = 0 } = {}) {
+export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [], noGapless = false,
+  volumeRange = null, port = 0 } = {}) {
   const calls = [];
-  const state = { transport: 'STOPPED', volume: 30, currentUri: '', nextUri: '' };
+  const state = { transport: 'STOPPED', volume: 30, muted: false, currentUri: '', nextUri: '' };
   const unescape = (x) => x.replace(/&amp;/g, '&');
   const server = http.createServer((req, res) => {
     let body = '';
@@ -50,7 +55,7 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         return;
       }
       const m = /^\/scpd\/(\w+)\.xml$/.exec(req.url);
-      if (m) return res.end(scpd(m[1]));
+      if (m) return res.end(scpd(m[1], volumeRange));
       const c = /^\/ctl\/(\w+)$/.exec(req.url);
       if (c) {
         const action = (req.headers.soapaction || '').replace(/"/g, '').split('#')[1];
@@ -66,6 +71,8 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         }
         if (action === 'SetAVTransportURI') state.currentUri = unescape(/<CurrentURI>(.*?)<\/CurrentURI>/.exec(body)?.[1] ?? '');
         if (action === 'SetNextAVTransportURI') state.nextUri = unescape(/<NextURI>(.*?)<\/NextURI>/.exec(body)?.[1] ?? '');
+        if (action === 'SetVolume') state.volume = Number(/<DesiredVolume>(\d+)</.exec(body)?.[1] ?? state.volume);
+        if (action === 'SetMute') state.muted = /<DesiredMute>(1|true)</.test(body);
         if (action === 'Play') state.transport = neverPlay ? 'STOPPED' : 'PLAYING';
         if (action === 'Stop') state.transport = 'STOPPED';
         if (action === 'Pause') state.transport = 'PAUSED_PLAYBACK';
@@ -73,6 +80,7 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         if (action === 'GetPositionInfo') out = `<TrackDuration>${state.trackDuration ?? '0:03:30'}</TrackDuration><TrackURI>${state.reportedUri ?? state.currentUri}</TrackURI><RelTime>${state.relTime ?? '0:01:05'}</RelTime>`;
         if (action === 'GetMediaInfo') out = `<CurrentURI>${state.currentUri}</CurrentURI>`;
         if (action === 'GetVolume') out = `<CurrentVolume>${state.volume}</CurrentVolume>`;
+        if (action === 'GetMute') out = `<CurrentMute>${state.muted ? 1 : 0}</CurrentMute>`;
         if (action === 'GetProtocolInfo') out = `<Source></Source><Sink>${sink}</Sink>`;
         res.setHeader('Content-Type', 'text/xml');
         res.end(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>

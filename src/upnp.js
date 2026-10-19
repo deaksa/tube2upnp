@@ -65,6 +65,24 @@ export async function fetchDescription(location, timeoutMs = 5000) {
   return parseDescription(await res.text(), location);
 }
 
+/** The allowed range of the RenderingControl Volume state variable, from its SCPD. */
+export function parseVolumeRange(xml) {
+  const root = et.parse(xml).getroot();
+  for (const v of root.findall('.//stateVariable')) {
+    if (text(v, 'name') !== 'Volume') continue;
+    const min = Number.parseFloat(text(v, 'allowedValueRange/minimum'));
+    const max = Number.parseFloat(text(v, 'allowedValueRange/maximum'));
+    return Number.isFinite(min) && Number.isFinite(max) && max > min ? { min, max } : null;
+  }
+  return null;
+}
+
+export async function fetchVolumeRange(scpdUrl, timeoutMs = 5000) {
+  if (!scpdUrl) return null;
+  const res = await fetch(scpdUrl, { signal: AbortSignal.timeout(timeoutMs) });
+  return res.ok ? parseVolumeRange(await res.text()) : null;
+}
+
 const esc = (s) => String(s ?? '').replace(/[<>&"']/g, (c) => ({
   '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;',
 }[c]));

@@ -134,6 +134,9 @@
   .btn.link { border: 0; background: none; padding: 0; text-decoration: underline; color: var(--muted); font-size: .8rem; }
   .code { font-size: 1.4rem; font-weight: 600; letter-spacing: .12em; }
   .error { color: var(--led-err); font-size: .85rem; margin: 0; }
+  .vol { display: inline-block; width: 5rem; height: .45rem; border-radius: .25rem; background: var(--plate-edge);
+    vertical-align: middle; margin-right: .4rem; overflow: hidden; }
+  .vol > i { display: block; height: 100%; background: var(--muted); }
   .speaker.away { opacity: .75; }
   .ignored { max-width: 42rem; color: var(--muted); font-size: .9rem; }
   .ignored ul { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .4rem; }
@@ -383,6 +386,7 @@ function speakerRow(r, app) {
     h('div', { class: 'controls' },
       h('h2', { class: 'name' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), r.friendlyName || r.name),
       h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address),
+      volumeLine(r.volume),
       r.senders.length ? h('p', { class: 'senders' }, 'Connected: ' + r.senders.join(', ')) : null,
       h('label', { class: 'field' }, 'Stream format', sel),
       fmtHint.length || r.format.learned ? h('p', { class: 'hint' }, fmtHint.join(' '), ' ',
@@ -418,6 +422,14 @@ function fmtIn(s) {
   return s < 60 ? Math.max(1, Math.round(s)) + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
 }
 
+function volumeLine(v, lastKnown = false) {
+  if (!v) return null;
+  const range = v.rangeKnown && (v.min !== 0 || v.max !== 100) ? ' (' + v.raw + ' of ' + v.max + ')' : '';
+  return h('p', { class: 'device', title: 'Volume as reported by the speaker' },
+    h('span', { class: 'vol', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.max(0, Math.min(100, v.level)) + '%' })),
+    'Volume ' + v.level + '%' + range + (v.muted ? ' · muted' : '') + (lastKnown ? ' (last known)' : ''));
+}
+
 function speakerAction(r, action, label, question) {
   return h('button', { class: 'btn', 'data-key': action + '-' + r.id, onclick: async (e) => {
     if (question && !confirm(question)) return;
@@ -443,6 +455,7 @@ function awayRow(r) {
         'aria-hidden': 'true' }), name),
       h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + (r.address ? ' at ' + r.address : '')
         + (r.dialPort ? ' · port ' + r.dialPort + ' kept for it' : '')),
+      volumeLine(r.volume, true),
       r.error ? h('p', { class: 'error' }, r.error) : null,
       r.state === 'starting' ? null : h('div', { class: 'row' },
         speakerAction(r, 'remove', 'Remove', 'Remove ' + name + '? Its port and saved settings are freed. '
@@ -611,7 +624,7 @@ async function refreshStats() {
           ['Format setting', r.format.override ?? 'default (' + r.format.global + ')'], ['Detected format', r.format.learned || '–'],
           ['Gapless support', r.gapless == null ? 'not tested yet' : r.gapless ? 'yes' : 'no'],
           ['SOAP calls / errors', r.soap.calls + ' / ' + r.soap.errors], ['Average round trip', ms(r.soap.avgMs)],
-          ['Status polls', r.polls], ['Last seen', r.lastSeenS + ' s ago'],
+          ['Status polls', r.polls], ['Last seen', r.lastSeenS + ' s ago'], ['Volume', r.volume ? r.volume.raw + ' (range ' + r.volume.min + '–' + r.volume.max + (r.volume.rangeKnown ? '' : ', assumed') + ')' : '–'],
           ['Accepts', r.sink.length ? r.sink.join(', ') : 'not reported']])))));
   } catch (e) { toast(e.message); }
 }

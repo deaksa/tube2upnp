@@ -81,7 +81,7 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 Open `http://<host>:8080/` in a browser. It has five views:
 
-- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Speakers found once are remembered, with a fixed port, and stay on the list:
+- **Speakers** shows each renderer's display: cover, title, progress, the prepared next track, and the speaker's volume as it reports it. Speakers found once are remembered, with a fixed port, and stay on the list:
   - **Offline** when a remembered speaker stops answering (it's checked every `DEVICE_CHECK_INTERVAL` seconds). Its cast receiver stops, so it leaves the cast menu, and starts again on the same port when the speaker is back.
   - **Not working** when it answers but its receiver couldn't start (the reason is shown, and it's retried).
   - **Remove** forgets an offline speaker: its port and saved settings are freed, and it's set up as new if it comes back. **Ignore** stops a speaker and keeps it out until you choose **Allow again** under *Ignored speakers*.
