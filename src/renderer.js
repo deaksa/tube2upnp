@@ -682,7 +682,7 @@ export class Renderer extends Player {
       const p = v.playing;
       this.#external = v.power !== 'on' || p?.playback === 'stop' ? null : {
         state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
-        title: p?.title ?? null, artist: p?.artist ?? null, source: v.inputText,
+        title: p?.title ?? null, artist: p?.artist ?? null, source: p?.station ?? v.inputText,
       };
       return;
     }

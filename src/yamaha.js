@@ -86,6 +86,8 @@ export class YamahaExtendedControl {
     // Net radio, Spotify, AirPlay, Bluetooth, USB, the DLNA server input...: netusb, if it's on that input.
     const n = await this.#get('netusb/getPlayInfo');
     if (n.input !== input) return null;
+    // Net radio puts the station in "artist" and the stream's "Artist - Title" in "track".
+    if (input === 'net_radio') return { playback: n.playback ?? null, title: n.track || n.artist || null, artist: null, station: n.track ? n.artist || null : null };
     const title = n.track || n.album || null;
     return { playback: n.playback ?? null, title, artist: n.artist || (n.track ? n.album || null : null) };
   }

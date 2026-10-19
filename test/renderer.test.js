@@ -628,9 +628,16 @@ test('Yamaha Extended Control: input, what plays on it, standby, master volume i
     'UPnP says STOPPED, YXC knows the radio plays');
 
   fake.state.yxc.main = { ...fake.state.yxc.main, input: 'net_radio', input_text: 'NET RADIO' };
-  fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: 'Jazz FM', artist: '', album: '' };
+  // As the RX-V4A reports it.
+  fake.state.yxc.netusb = { input: 'net_radio', playback: 'play', artist: 'FM 103.9 A ROCK (Budapest/Hungarian)', album: '',
+    track: "Queen - Don't Stop Me Now" };
   await r.refreshStatus();
-  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO' });
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: "Queen - Don't Stop Me Now", artist: null,
+    source: 'FM 103.9 A ROCK (Budapest/Hungarian)' }, 'the station is the source');
+  fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: '', artist: 'Jazz FM', album: '' };
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO' },
+    'a station without song titles');
 
   fake.state.yxc.main = { ...fake.state.yxc.main, input: 'hdmi1', input_text: 'TV', volume: 80, mute: true };
   await r.refreshStatus();
