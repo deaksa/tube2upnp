@@ -208,6 +208,10 @@ test('casting mid-video with a non-seekable format starts the stream at that pos
 const A = 'AAAAAAAAAAA';
 const B = 'BBBBBBBBBBB';
 const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+/** Wait for a condition instead of a fixed time, so a loaded machine can't make a test flaky. */
+async function until(cond, ms = 5000) {
+  for (const end = Date.now() + ms; !cond() && Date.now() < end;) await wait(20);
+}
 
 test('gapless: next track is prepared, queued with SetNextAVTransportURI, and adopted without reloading', async (t) => {
   const fake = await startFakeRenderer();
@@ -232,6 +236,52 @@ test('gapless: next track is prepared, queued with SetNextAVTransportURI, and ad
   assert.equal(r.nowPlaying.videoId, B);
   assert.equal(fake.calls.filter((c) => c.action === 'SetAVTransportURI').length, loadsBefore, 'B was not reloaded');
   assert.equal(fake.state.transport, 'PLAYING');
+  await r.destroy();
+});
+
+test('gapless: yt-cast-receiver stopping the player before play() does not cut off or reload the track', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  const yt = (id) => ({ id, client: { key: 'YT' } });
+  r.getUpcomingVideo = () => ({ id: B });
+  // Through Player.play() like a real cast, so the player is PLAYING when the next track comes.
+  assert.equal(await r.play(yt(A), 0), true);
+  await until(() => fake.state.nextUri);
+
+  // Player.next() -> Player.play(): stops a PLAYING player first, then plays.
+  r.next = async () => r.play(yt(B), 0);
+  r.getUpcomingVideo = () => null;
+  const count = (action) => fake.calls.filter((c) => c.action === action).length;
+  const loadsBefore = count('SetAVTransportURI');
+  const stopsBefore = count('Stop');
+  fake.advance();
+  await until(() => r.nowPlaying?.videoId === B);
+  assert.equal(r.nowPlaying.videoId, B);
+  assert.equal(count('SetAVTransportURI'), loadsBefore, 'B was not reloaded');
+  assert.equal(count('Stop'), stopsBefore, 'renderer was not stopped');
+  assert.equal(fake.state.transport, 'PLAYING');
+  await r.destroy();
+});
+
+test('gapless: if the queue turns out to be over, the track the renderer played on into is stopped', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { prefetch: true, gapless: true });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  r.getUpcomingVideo = () => ({ id: B });
+  assert.equal(await r.play({ id: A, client: { key: 'YT' } }, 0), true);
+  await until(() => fake.state.nextUri);
+
+  // Player.next() with nothing left: stop(), return false.
+  r.next = async () => { await r.stop(); return false; };
+  r.getUpcomingVideo = () => null;
+  fake.advance();
+  await until(() => fake.state.transport === 'STOPPED');
+  assert.equal(fake.state.transport, 'STOPPED');
   await r.destroy();
 });
 
