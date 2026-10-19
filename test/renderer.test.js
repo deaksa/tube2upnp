@@ -624,25 +624,42 @@ test('Yamaha Extended Control: input, what plays on it, standby, master volume i
   fake.state.yxc.main = { ...fake.state.yxc.main, input: 'tuner', input_text: 'TUNER' };
   fake.state.yxc.tuner = { band: 'fm', fm: { freq: 103900 }, rds: { program_service: 'PETOFI', radio_text_a: '' } };
   await r.refreshStatus();
-  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'PETOFI', artist: 'FM 103.90 MHz', source: 'TUNER' },
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'PETOFI', artist: 'FM 103.90 MHz', source: 'TUNER', art: null },
     'UPnP says STOPPED, YXC knows the radio plays');
 
   fake.state.yxc.main = { ...fake.state.yxc.main, input: 'net_radio', input_text: 'NET RADIO' };
   // As the RX-V4A reports it.
   fake.state.yxc.netusb = { input: 'net_radio', playback: 'play', artist: 'FM 103.9 A ROCK (Budapest/Hungarian)', album: '',
-    track: "Queen - Don't Stop Me Now" };
+    track: "Queen - Don't Stop Me Now", albumart_url: '/YamahaRemoteControl/AlbumART/AlbumART2229.png' };
   await r.refreshStatus();
-  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: "Queen - Don't Stop Me Now", artist: null,
-    source: 'FM 103.9 A ROCK (Budapest/Hungarian)' }, 'the station is the source');
+  const ext = r.statusInfo().external;
+  assert.deepEqual({ ...ext, art: undefined }, { state: 'PLAYING', title: "Queen - Don't Stop Me Now", artist: null,
+    source: 'FM 103.9 A ROCK (Budapest/Hungarian)', art: undefined }, 'the station is the source');
+  assert.equal(typeof ext.art, 'number', 'a cover to show');
+  assert.equal(r.art.type, 'image/png');
+  assert.match(r.art.data.toString(), /AlbumART2229/);
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, ext.art, 'same cover: not fetched again');
+  assert.equal(fake.calls.filter((c) => c.action === 'albumart').length, 1);
+
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, track: 'Next song', albumart_url: '/YamahaRemoteControl/AlbumART/AlbumART2230.png' };
+  await r.refreshStatus();
+  assert.notEqual(r.statusInfo().external.art, ext.art, 'a new cover gets a new version');
+  assert.match(r.art.data.toString(), /AlbumART2230/);
+
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, albumart_url: 'http://evil.example/x.png' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, null, 'never fetched from another host');
+
   fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: '', artist: 'Jazz FM', album: '' };
   await r.refreshStatus();
-  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO' },
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO', art: null },
     'a station without song titles');
 
   fake.state.yxc.main = { ...fake.state.yxc.main, input: 'hdmi1', input_text: 'TV', volume: 80, mute: true };
   await r.refreshStatus();
   info = r.statusInfo();
-  assert.deepEqual(info.external, { state: 'PLAYING', title: null, artist: null, source: 'TV' });
+  assert.deepEqual(info.external, { state: 'PLAYING', title: null, artist: null, source: 'TV', art: null });
   assert.equal(info.volume.level, 50);
   assert.equal(info.volume.muted, true);
 

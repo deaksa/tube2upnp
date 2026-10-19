@@ -288,6 +288,12 @@ export class DeviceManager {
     return this.#known.get(udn)?.icon ?? null;
   }
 
+  /** The cover of what the speaker plays on another source (Yamaha), for the status page. */
+  art(udn) {
+    const art = this.renderers.get(udn)?.art;
+    return art?.data ? art : null;
+  }
+
   #lookup(udn) {
     const rec = this.#known.get(udn);
     if (!rec) throw httpError(404, 'Unknown speaker');

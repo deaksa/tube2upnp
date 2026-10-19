@@ -118,13 +118,17 @@ export async function fetchScpd(scpdUrl, timeoutMs = 5000) {
 const ICON_TYPES = /^image\/(png|jpeg|gif)$/;
 const MAX_ICON_BYTES = 256 * 1024;
 
-/** Fetch a device icon to serve from the status page (its CSP doesn't allow LAN http images). */
-export async function fetchIcon(url, timeoutMs = 5000) {
+/**
+ * Fetch a device icon (or cover) to serve from the status page (its CSP doesn't allow
+ * LAN http images). Raster images only, and not too big: the bytes are kept in memory.
+ */
+export async function fetchIcon(url, { timeoutMs = 5000, maxBytes = MAX_ICON_BYTES } = {}) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   const type = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
   if (!res.ok || !ICON_TYPES.test(type)) return null;
+  if (Number(res.headers.get('content-length')) > maxBytes) return null;
   const data = Buffer.from(await res.arrayBuffer());
-  return data.length && data.length <= MAX_ICON_BYTES ? { type, data } : null;
+  return data.length && data.length <= maxBytes ? { type, data } : null;
 }
 
 /** Title (and artist) from a DIDL-Lite metadata string, for "playing another source". */

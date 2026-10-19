@@ -33,6 +33,7 @@ function fakeDevices(r) {
     ignore: async (id) => { r.calls.push(['ignore', id]); },
     unignore: async (id) => { r.calls.push(['unignore', id]); },
     icon: (id) => (id === 'r1' ? { type: 'image/png', data: Buffer.from('89504e47', 'hex') } : null),
+    art: (id) => (id === 'r1' ? { type: 'image/jpeg', data: Buffer.from('ffd8ffe0', 'hex') } : null),
   };
 }
 
@@ -222,4 +223,10 @@ test('speaker icons are served by us, as images only, behind the token', async (
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), Buffer.from('89504e47', 'hex'));
   assert.equal((await fetch(base + '/api/renderers/r2/icon?token=s3cret')).status, 404);
   assert.equal((await fetch(base + '/api/renderers/r1/icon')).status, 401);
+
+  const art = await fetch(base + '/api/renderers/r1/art?v=3&token=s3cret');
+  assert.equal(art.headers.get('content-type'), 'image/jpeg');
+  assert.match(art.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.equal((await fetch(base + '/api/renderers/r2/art?token=s3cret')).status, 404);
+  assert.equal((await fetch(base + '/api/renderers/r1/art')).status, 401);
 });

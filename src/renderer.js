@@ -42,6 +42,7 @@ export class Renderer extends Player {
   #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
   #yxc = null;             // Yamaha Extended Control client, for MusicCast devices
   #vendor = null;          // last YXC status: { power, input, inputText, volume, playing }
+  #artVersion = 0;         // changes with the cover, so the page doesn't show a cached one
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -656,6 +657,15 @@ export class Renderer extends Player {
     return await guess.works() ? guess : null;
   }
 
+  /** The cover of what plays on another source, fetched once per URL (Yamaha changes the URL per track). */
+  async #refreshArt(url) {
+    if (url === (this.art?.url ?? null)) return;
+    const img = url ? await fetchIcon(url, { maxBytes: 1024 * 1024 }).catch(() => null) : null;
+    // Remember a failed URL too, so it isn't fetched again on every check.
+    this.art = url ? { url, type: img?.type ?? null, data: img?.data ?? null } : null;
+    this.#artVersion++;
+  }
+
   async #refreshVendor(opts) {
     try {
       const s = await this.#yxc.status(opts);
@@ -673,6 +683,7 @@ export class Renderer extends Player {
   async #refreshExternal() {
     if (this.#current) {
       this.#external = null;
+      this.art = null;
       return;
     }
     // UPnP only sees the device's own DLNA playback (its "server" input). YXC knows the
@@ -680,12 +691,16 @@ export class Renderer extends Player {
     const v = this.#vendor;
     if (v && (v.power !== 'on' || v.input !== 'server')) {
       const p = v.playing;
-      this.#external = v.power !== 'on' || p?.playback === 'stop' ? null : {
+      const off = v.power !== 'on' || p?.playback === 'stop';
+      await this.#refreshArt(off ? null : p?.art ?? null);
+      this.#external = off ? null : {
         state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
         title: p?.title ?? null, artist: p?.artist ?? null, source: p?.station ?? v.inputText,
+        art: this.art?.data ? this.#artVersion : null,
       };
       return;
     }
+    this.art = null;
     const state = await this.#transportState();
     if (state !== 'PLAYING' && state !== 'PAUSED_PLAYBACK') {
       this.#external = null;
