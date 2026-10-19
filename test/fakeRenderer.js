@@ -28,7 +28,7 @@ const scpd = (svc) => `<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:se
     args.map(([n, d]) => `<argument><name>${n}</name><direction>${d}</direction></argument>`).join('')
   }</argumentList></action>`).join('')}</actionList></scpd>`;
 
-export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [], noGapless = false } = {}) {
+export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*', neverPlay = false, bareFaultOn = [], noGapless = false, port = 0 } = {}) {
   const calls = [];
   const state = { transport: 'STOPPED', volume: 30, currentUri: '', nextUri: '' };
   const unescape = (x) => x.replace(/&amp;/g, '&');
@@ -84,7 +84,7 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
   });
   // Simulate the renderer reaching the end of the track and playing on into the queued one.
   const advance = () => { state.currentUri = state.nextUri; state.nextUri = ''; state.transport = 'PLAYING'; };
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({
     server, calls, state, advance, location: `http://127.0.0.1:${server.address().port}/desc.xml`,
   })));
 }

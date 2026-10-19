@@ -47,10 +47,13 @@ export const config = Object.freeze({
   // IP address renderers should use to reach us. Auto-detected per renderer if unset.
   advertiseIp: str('ADVERTISE_IP', null),
 
-  // Re-scan interval and stale-renderer check interval (seconds).
+  // Re-scan interval (seconds) for new speakers.
   discoveryInterval: int('DISCOVERY_INTERVAL', 300),
-  pruneInterval: int('PRUNE_INTERVAL', 60),
   defaultMaxAge: int('DEFAULT_MAX_AGE', 1800),
+  // Known speakers are checked directly this often (seconds); after this many missed
+  // checks in a row one goes offline and its cast receiver stops.
+  deviceCheckInterval: Math.max(5, int('DEVICE_CHECK_INTERVAL', 30)),
+  deviceOfflineAfter: Math.max(1, int('DEVICE_OFFLINE_AFTER', 3)),
 
   // Only expose renderers whose friendly name matches INCLUDE and does not match EXCLUDE.
   include: regex('RENDERER_INCLUDE'),

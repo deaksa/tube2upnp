@@ -134,6 +134,9 @@
   .btn.link { border: 0; background: none; padding: 0; text-decoration: underline; color: var(--muted); font-size: .8rem; }
   .code { font-size: 1.4rem; font-weight: 600; letter-spacing: .12em; }
   .error { color: var(--led-err); font-size: .85rem; margin: 0; }
+  .speaker.away { opacity: .75; }
+  .ignored { max-width: 42rem; color: var(--muted); font-size: .9rem; }
+  .ignored ul { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .4rem; }
 
   /* Logs */
   .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .75rem; }
@@ -326,14 +329,16 @@ function renderSpeakers(app) {
   const root = document.getElementById('speakers');
   const focused = document.activeElement?.dataset?.key;
   root.replaceChildren();
-  if (!speakerData.length) {
+  const shown = speakerData.filter((r) => r.state !== 'ignored');
+  const ignored = speakerData.filter((r) => r.state === 'ignored');
+  if (!shown.length) {
     root.append(h('div', { class: 'empty' },
       h('p', {}, 'No speakers found yet.'),
       h('p', { class: 'hint' }, 'Tube2U[PnP] looks for DLNA/UPnP renderers on startup and every few minutes. '
         + 'If yours is missing, check that this machine is on the same network and that UDP port 1900 is not blocked.')));
-    return;
   }
-  for (const r of speakerData) root.append(speakerRow(r, app));
+  for (const r of shown) root.append(r.state === 'online' ? speakerRow(r, app) : awayRow(r));
+  if (ignored.length) root.append(ignoredList(ignored));
   if (focused) root.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus();
   tick();
 }
@@ -393,8 +398,63 @@ function speakerRow(r, app) {
           catch (err) { toast(err.message); }
           refreshSpeakers();
         } }, code ? 'New TV code' : 'Get TV code'),
-        code ? h('span', { class: 'code', 'aria-label': 'TV code' }, code.replace(/(\d{3})(?=\d)/g, '$1 ')) : null),
+        code ? h('span', { class: 'code', 'aria-label': 'TV code' }, code.replace(/(\d{3})(?=\d)/g, '$1 ')) : null,
+        speakerAction(r, 'ignore', 'Ignore', 'Ignore ' + (r.friendlyName || r.name) + '? Its receiver stops and it '
+          + 'leaves the cast menu until you allow it again. Its port and saved settings are freed.')),
       code ? h('p', { class: 'hint' }, 'In the YouTube app: Settings, Watch on TV, Enter TV code.') : null));
+}
+
+const STATE_TEXT = { offline: 'Offline', starting: 'Starting…', error: 'Not working' };
+
+function fmtAgo(s) {
+  if (s == null) return 'never';
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  return Math.round(s / 86400) + ' days ago';
+}
+
+function fmtIn(s) {
+  return s < 60 ? Math.max(1, Math.round(s)) + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
+}
+
+function speakerAction(r, action, label, question) {
+  return h('button', { class: 'btn', 'data-key': action + '-' + r.id, onclick: async (e) => {
+    if (question && !confirm(question)) return;
+    e.target.disabled = true;
+    try { await api('/api/renderers/' + encodeURIComponent(r.id) + '/' + action, { method: 'POST' }); }
+    catch (err) { toast(err.message); }
+    refreshSpeakers();
+  } }, label);
+}
+
+/** A remembered speaker whose receiver isn't running: offline, starting or failing. */
+function awayRow(r) {
+  const name = r.friendlyName || r.name;
+  // Kept short: the display line is cut to one line on narrow screens.
+  const detail = r.state === 'offline' ? 'Last seen ' + fmtAgo(r.lastSeenS) + ' · not in the cast menu'
+    : r.state === 'error' ? 'Receiver did not start' + (r.retryInS ? ' · next try in ' + fmtIn(r.retryInS) : '')
+      : 'Setting up its receiver…';
+  return h('article', { class: 'speaker away', 'aria-label': name },
+    h('div', { class: 'display idle' }, h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
+      h('div', {}, h('p', { class: 'title' }, STATE_TEXT[r.state] || r.state), h('p', { class: 'artist' }, detail))),
+    h('div', { class: 'controls' },
+      h('h2', { class: 'name' }, h('span', { class: 'led ' + (r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : ''),
+        'aria-hidden': 'true' }), name),
+      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + (r.address ? ' at ' + r.address : '')
+        + (r.dialPort ? ' · port ' + r.dialPort + ' kept for it' : '')),
+      r.error ? h('p', { class: 'error' }, r.error) : null,
+      r.state === 'starting' ? null : h('div', { class: 'row' },
+        speakerAction(r, 'remove', 'Remove', 'Remove ' + name + '? Its port and saved settings are freed. '
+          + 'If it comes back, it is set up again as a new speaker.'),
+        speakerAction(r, 'ignore', 'Ignore', 'Ignore ' + name + '? It is not set up again until you allow it.'))));
+}
+
+function ignoredList(list) {
+  return h('details', { class: 'ignored' }, h('summary', {}, 'Ignored speakers (' + list.length + ')'),
+    h('ul', {}, list.map((r) => h('li', { class: 'row' }, (r.friendlyName || r.name) + ' ',
+      speakerAction(r, 'unignore', 'Allow again')))),
+    h('p', { class: 'hint' }, 'An allowed speaker is set up again the next time it is found on the network.'));
 }
 
 // Move progress meters smoothly between refreshes.
@@ -545,13 +605,13 @@ async function refreshStats() {
             ['Gapless', st.app.gapless ? 'on' : 'off']])),
       ),
       h('h2', {}, 'Per speaker'),
-      h('div', { class: 'grid' }, st.renderers.map((r) => panel(r.friendlyName || r.name,
+      h('div', { class: 'grid' }, st.renderers.filter((r) => r.state === 'online').map((r) => panel(r.friendlyName || r.name,
         dl([['Address', r.address + ' (we answer on ' + r.advertisedIp + ')'], ['DIAL port', r.dialPort], ['Cast receiver', r.receiver],
           ['Player / renderer state', (r.playerStatus || '–') + ' / ' + (r.transport || '–')],
           ['Format setting', r.format.override ?? 'default (' + r.format.global + ')'], ['Detected format', r.format.learned || '–'],
           ['Gapless support', r.gapless == null ? 'not tested yet' : r.gapless ? 'yes' : 'no'],
           ['SOAP calls / errors', r.soap.calls + ' / ' + r.soap.errors], ['Average round trip', ms(r.soap.avgMs)],
-          ['Status polls', r.polls], ['Last SSDP announcement', r.lastSeenS + ' s ago'],
+          ['Status polls', r.polls], ['Last seen', r.lastSeenS + ' s ago'],
           ['Accepts', r.sink.length ? r.sink.join(', ') : 'not reported']])))));
   } catch (e) { toast(e.message); }
 }

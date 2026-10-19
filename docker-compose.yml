@@ -39,6 +39,8 @@ services:
       START_TIMEOUT_MS: ${START_TIMEOUT_MS:-12000}
       POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-2000}
       DISCOVERY_INTERVAL: ${DISCOVERY_INTERVAL:-300}
+      DEVICE_CHECK_INTERVAL: ${DEVICE_CHECK_INTERVAL:-30}  # check remembered speakers this often (s)
+      DEVICE_OFFLINE_AFTER: ${DEVICE_OFFLINE_AFTER:-3}     # missed checks before a speaker goes offline
       SPONSORBLOCK_API: ${SPONSORBLOCK_API:-}
       YTDLP_FORMAT: ${YTDLP_FORMAT:-}
       YTDLP_EXTRA_ARGS: ${YTDLP_EXTRA_ARGS:-} # e.g. --cookies /data/cookies.txt

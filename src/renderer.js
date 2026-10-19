@@ -62,6 +62,7 @@ export class Renderer extends Player {
     this.history = deps.history ?? null;
     this.media = deps.mediaServer;
     this.createReceiver = deps.createReceiver ?? ((player, opts) => new YouTubeCastReceiver(player, opts));
+    this.onTerminate = deps.onTerminate ?? null;
     this.baseLog = deps.logger;
     this.log = deps.logger.child(`[${address}]`);
     this.name = null;
@@ -74,11 +75,6 @@ export class Renderer extends Player {
   refresh(maxAge = this.maxAge) {
     this.maxAge = maxAge;
     this.lastSeen = Date.now();
-  }
-
-  isStale() {
-    // Allow a grace period: many devices re-announce exactly at max-age.
-    return Date.now() - this.lastSeen > this.maxAge * 1000 * 1.5;
   }
 
   get receiverStatus() {
@@ -174,6 +170,7 @@ export class Renderer extends Player {
     this.#receiver.on('terminate', (err) => {
       this.lastError = `Receiver terminated: ${err.message}`;
       this.log.error(this.lastError);
+      this.onTerminate?.(err); // the device manager restarts it
     });
 
     await this.#receiver.start();
