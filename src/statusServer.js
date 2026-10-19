@@ -72,7 +72,7 @@ function csrfOk(req) {
   return !origin || origin === `http://${req.headers.host}`;
 }
 
-export function startStatusServer(config, { renderers, mediaServer, settings, history = null }, log) {
+export function startStatusServer(config, { devices, mediaServer, settings, history = null, rediscover = () => {} }, log) {
   const me = os.hostname().toLowerCase();
   const allowedHosts = new Set([me, `${me}.local`, ...(config.statusHosts ?? []).map((h) => h.toLowerCase())]);
   const warnedHosts = new Set();
@@ -80,7 +80,7 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
     ['GET', /^\/api\/status$/, async () => ({
       app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
         outputFormat: config.outputFormat, prefetch: config.prefetch, gapless: config.gapless },
-      renderers: [...renderers.values()].map((r) => r.statusInfo()),
+      renderers: devices.list(),
     })],
     ['GET', /^\/api\/stats$/, async () => ({ ...stats.snapshot(), cache: await mediaServer.cacheInfo() })],
     ['GET', /^\/api\/logs$/, async (_m, url) => ({ lines: recentLogs(Number(url.searchParams.get('after')) || 0) })],
@@ -129,6 +129,19 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
       return { ok: true };
     }],
     ['POST', /^\/api\/renderers\/([^/]+)\/pair$/, async (m) => ({ code: await renderer(m[1]).getPairingCode() })],
+    ['POST', /^\/api\/renderers\/([^/]+)\/remove$/, async (m) => {
+      await devices.remove(speakerId(m[1]));
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/ignore$/, async (m) => {
+      await devices.ignore(speakerId(m[1]));
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/unignore$/, async (m) => {
+      await devices.unignore(speakerId(m[1]));
+      rediscover(); // set it up again right away if it's there
+      return { ok: true };
+    }],
   ];
 
   function playHistory() {
@@ -138,8 +151,16 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
 
   const limit = (url) => Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 100));
 
+  function speakerId(id) {
+    try {
+      return decodeURIComponent(id);
+    } catch {
+      throw Object.assign(new Error('Bad speaker id'), { status: 400 });
+    }
+  }
+
   function renderer(id) {
-    const r = renderers.get(decodeURIComponent(id));
+    const r = devices.renderers.get(speakerId(id));
     if (!r) throw Object.assign(new Error('Unknown renderer - it may have gone offline'), { status: 404 });
     return r;
   }

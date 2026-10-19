@@ -12,10 +12,11 @@ import { History } from './history.js';
 import { readFileSync } from 'node:fs';
 import { MediaServer } from './mediaServer.js';
 import { Renderer } from './renderer.js';
+import { DeviceManager } from './devices.js';
+import { removeRendererData } from './dataStore.js';
 import { startStatusServer } from './statusServer.js';
 
 const RENDERER_ST = 'urn:schemas-upnp-org:device:MediaRenderer:1';
-const RETRY_FAILED_MS = 5 * 60 * 1000;
 
 const log = new Logger(config.logLevel, '[tube2upnp]');
 const resolver = new Resolver(config, log.child('[yt-dlp]'));
@@ -25,91 +26,39 @@ const settings = new Settings(config, log.child('[settings]'));
 const sponsorblock = new SponsorBlock(config, settings, log.child('[sponsorblock]'));
 const history = config.history ? new History(config, log.child('[history]')) : null;
 
-/** udn -> Renderer (running) */
-const renderers = new Map();
-/** udn -> { location, until } for devices that failed or were filtered out */
-const skipped = new Map();
-/** udn currently initialising */
-const pending = new Set();
-const usedPorts = new Set();
+const devices = new DeviceManager(config, {
+  logger: log.child('[devices]'),
+  createRenderer: ({ udn, location, address, maxAge, port, onTerminate }) => new Renderer({
+    udn, location, address, maxAge: maxAge ?? config.defaultMaxAge, port,
+    deps: { config, resolver, mediaServer, sponsorblock, history, logger: log, onTerminate },
+  }),
+  probe: async (location) => {
+    try {
+      const res = await fetch(location, { signal: AbortSignal.timeout(5000) });
+      await res.arrayBuffer();
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+  removeData: (udn) => removeRendererData(config.dataDir, udn, [mediaServer.cacheDir]),
+});
 
-function allocPort() {
-  let p = config.receiverBasePort;
-  while (usedPorts.has(p)) p++;
-  usedPorts.add(p);
-  return p;
-}
-
-async function onAlive(headers, rinfo) {
+function onAlive(headers, rinfo) {
   const type = headers.ST ?? headers.NT ?? '';
   if (!/urn:schemas-upnp-org:device:MediaRenderer:\d/.test(type)) return;
-
   const udn = udnFromUsn(headers.USN);
   const location = headers.LOCATION;
   if (!udn || !location) return;
-  const age = maxAge(headers.CACHECONTROL, config.defaultMaxAge);
-
-  const existing = renderers.get(udn);
-  if (existing) {
-    if (existing.location === location) {
-      existing.refresh(age);
-      return;
-    }
-    // Same device, new description URL (rebooted, DHCP change, random port): rebuild.
-    log.info(`${existing.name} moved to ${location} - recreating`);
-    await removeRenderer(udn);
-  }
-
-  const skip = skipped.get(udn);
-  if (skip && skip.location === location && skip.until > Date.now()) return;
-  if (pending.has(udn)) return;
-
-  pending.add(udn);
-  const port = allocPort();
-  const r = new Renderer({
-    udn, location, address: rinfo.address, maxAge: age, port,
-    deps: { config, resolver, mediaServer, sponsorblock, history, logger: log },
-  });
-  try {
-    const ok = await r.init();
-    if (ok) {
-      renderers.set(udn, r);
-      skipped.delete(udn);
-    } else {
-      usedPorts.delete(port);
-      skipped.set(udn, { location, until: Infinity });
-    }
-  } catch (err) {
-    log.warn(`Could not set up renderer at ${location}: ${err.message} (retry in ${RETRY_FAILED_MS / 60000} min)`);
-    await r.destroy();
-    usedPorts.delete(port);
-    skipped.set(udn, { location, until: Date.now() + RETRY_FAILED_MS });
-  } finally {
-    pending.delete(udn);
-  }
-}
-
-async function removeRenderer(udn) {
-  const r = renderers.get(udn);
-  if (!r) return;
-  renderers.delete(udn);
-  await r.destroy();
-  usedPorts.delete(r.port);
-  log.info(`Removed renderer ${r.name}`);
+  devices.seen({ udn, location, address: rinfo.address, maxAge: maxAge(headers.CACHECONTROL, config.defaultMaxAge) })
+    .catch((e) => log.error('alive handler:', e));
 }
 
 function onByebye(headers) {
+  // Only the MediaRenderer's own byebye: a root or service notice isn't the speaker leaving.
+  if (!/urn:schemas-upnp-org:device:MediaRenderer:\d/.test(headers.NT ?? '')) return;
   const udn = udnFromUsn(headers.USN);
-  if (udn && renderers.has(udn)) removeRenderer(udn);
-}
-
-function prune() {
-  for (const [udn, r] of renderers) {
-    if (r.isStale()) {
-      log.info(`${r.name} not seen for ${Math.round((Date.now() - r.lastSeen) / 1000)} s - removing`);
-      removeRenderer(udn);
-    }
-  }
+  if (udn) devices.gone(udn).catch((e) => log.error('byebye handler:', e));
 }
 
 async function checkTools() {
@@ -135,7 +84,7 @@ async function shutdown(sig) {
   shuttingDown = true;
   log.info(`${sig} received - stopping receivers so they leave the cast menu`);
   ssdp.close();
-  await Promise.allSettled([...renderers.keys()].map(removeRenderer));
+  await devices.stopAll();
   mediaServer.stop();
   await history?.flush();
   process.exit(0);
@@ -144,6 +93,7 @@ async function shutdown(sig) {
 async function main() {
   await settings.load();
   await history?.load();
+  await devices.load();
   const unknown = config.sponsorblockCategories.filter((c) => !CATEGORIES[c]);
   if (unknown.length) log.warn(`Unknown SPONSORBLOCK_CATEGORIES ignored by SponsorBlock: ${unknown.join(', ')}`);
   const sb = settings.sponsorblock;
@@ -153,18 +103,22 @@ async function main() {
   stats.startSampling();
   scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
   await mediaServer.start();
-  if (config.statusPort) startStatusServer(config, { renderers, mediaServer, settings, history }, log.child('[status]'));
+  const search = () => ssdp.search(RENDERER_ST, 3);
+  if (config.statusPort) {
+    startStatusServer(config, { devices, mediaServer, settings, history, rediscover: search }, log.child('[status]'));
+  }
 
-  ssdp.on('alive', (h, rinfo) => onAlive(h, rinfo).catch((e) => log.error('alive handler:', e)));
+  ssdp.on('alive', onAlive);
   ssdp.on('byebye', onByebye);
   ssdp.listen();
 
-  const search = () => ssdp.search(RENDERER_ST, 3);
+  // Known speakers come up on their own ports right away, without waiting for SSDP.
+  devices.checkAll();
   search();
   // A second search shortly after start catches devices that drop the first packet.
   setTimeout(search, 5000).unref();
   setInterval(search, config.discoveryInterval * 1000).unref();
-  setInterval(prune, config.pruneInterval * 1000);
+  setInterval(() => devices.checkAll(), config.deviceCheckInterval * 1000);
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));

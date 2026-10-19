@@ -522,3 +522,30 @@ test('history: gapless continuation counts both tracks', async (t) => {
   assert.deepEqual(records.map((e) => e.videoId), [A, B]);
   await r.destroy();
 });
+
+test('volume for the status page: read at start, scaled to the device range, refreshed while playing', async (t) => {
+  const fake = await startFakeRenderer({ volumeRange: [0, 80] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().volume, { level: 38, raw: 30, min: 0, max: 80, muted: false, rangeKnown: true });
+
+  await r.doPlay({ id: A }, 0);
+  Object.assign(fake.state, { volume: 60, muted: true }); // turned up on the device, then muted
+  await until(() => r.statusInfo().volume.raw === 60);
+  assert.deepEqual(r.statusInfo().volume, { level: 75, raw: 60, min: 0, max: 80, muted: true, rangeKnown: true });
+
+  assert.equal(await r.doSetVolume({ level: 20, muted: false }), true);
+  assert.equal(r.statusInfo().volume.raw, 20, 'a change from the app shows at once');
+  assert.deepEqual(await r.doGetVolume(), { level: 20, muted: false }, 'the app still gets the raw value, as before');
+  await r.destroy();
+});
+
+test('volume: a device without a range in its SCPD is assumed to be 0-100', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().volume, { level: 30, raw: 30, min: 0, max: 100, muted: false, rangeKnown: false });
+  await r.destroy();
+});

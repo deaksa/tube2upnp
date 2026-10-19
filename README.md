@@ -81,7 +81,12 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 Open `http://<host>:8080/` in a browser. It has five views:
 
-- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Here you can also:
+- **Speakers** shows each renderer's display: cover, title, progress, the prepared next track, and the speaker's volume as it reports it. Speakers found once are remembered, with a fixed port, and stay on the list:
+  - **Offline** when a remembered speaker stops answering (it's checked every `DEVICE_CHECK_INTERVAL` seconds). Its cast receiver stops, so it leaves the cast menu, and starts again on the same port when the speaker is back.
+  - **Not working** when it answers but its receiver couldn't start (the reason is shown, and it's retried).
+  - **Remove** forgets an offline speaker: its port and saved settings are freed, and it's set up as new if it comes back. **Ignore** stops a speaker and keeps it out until you choose **Allow again** under *Ignored speakers*.
+
+  For a running speaker you can also:
   - choose the **stream format for that speaker**. Same as default, Detect automatically, or a fixed format. It's saved per speaker and applied immediately: a playing track reloads at its current position.
   - clear a detected format, so it's detected again.
   - get a **TV code** for the YouTube app.
@@ -121,7 +126,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 |---|---|---|
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` |
 | `ADVERTISE_IP` | auto | IP that renderers and phones use to reach us. By default it's auto-detected per renderer from the routing table. Setting it also pins DIAL to that address. |
-| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each renderer takes the next free port. |
+| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each speaker gets its own port and keeps it across restarts (remembered in `DATA_DIR/devices.json`). A removed speaker's port is reused. |
 | `MEDIA_PORT` | `8000` | Streaming port |
 | `STATUS_PORT` | `8080` | Status page. `0` disables it. |
 | `STATUS_TOKEN` | – | If set, the status page's API requires this token (open the page as `/?token=…`) |
@@ -140,7 +145,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `YTDLP_UPDATE_HOURS` | `24` | Self-update interval. `0` disables it. |
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
-| `DATA_DIR` | `./data` (`/data` in Docker) | Per-renderer screen IDs, so phones remember the receivers |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Remembered speakers and their ports, per-renderer screen IDs (so phones remember the receivers), settings, history and the cache |
 | `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
@@ -152,12 +157,15 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `HISTORY` | `true` | Keep a playback history (see [Playback history](#playback-history)) |
 | `HISTORY_MAX` | `5000` | Individual plays kept in the history list. Play counts are kept regardless. |
 | `HISTORY_MIN_PLAY_S` | `30` | Seconds a track must play (or half its length, if shorter) to count as played |
-| `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
+| `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches for new speakers |
+| `DEVICE_CHECK_INTERVAL` | `30` | Seconds between direct checks of remembered speakers (minimum 5) |
+| `DEVICE_OFFLINE_AFTER` | `3` | Missed checks in a row before a speaker is shown offline and its receiver stops (twice as many during playback) |
 
 ## Troubleshooting
 
 **The speaker doesn't appear in the Cast menu.**
 - Check the logs or the status page first. If the renderer is listed there, discovery towards the speaker works, and the problem is between the phone and Tube2U[PnP].
+- If the status page lists it as **Offline** although it's on, it isn't answering Tube2U[PnP]'s checks (its network may sleep in standby, or a firewall is in the way). It comes back on its own when it answers again; raise `DEVICE_OFFLINE_AFTER` if it drops out too eagerly. If it's under **Ignored speakers**, choose **Allow again**.
 - Phone and server must be on the same L2 network. Guest Wi-Fi, client isolation and "multicast enhancement" on some access points all block DIAL.
 - As a workaround, use **Link with TV code**. Tap "TV code" on the status page, then in the YouTube app go to Settings → Watch on TV → Link with TV code. This uses YouTube's servers instead of local discovery.
 
@@ -188,7 +196,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux, or FLAC), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
 - **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances. The next track is prepared in advance, and played gaplessly where the renderer supports it.
-- **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
+- **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, and moved devices are recreated. Speakers are remembered with a fixed port, checked directly so switched-off ones leave the cast menu within a minute or two, and can be removed or ignored on the status page. Receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page:** now playing, per-speaker format setting, live logs, stats for nerds, pairing codes. JSON API and `/healthz`, optional token, CSRF protection.
 - **Packaging:** Node 24 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
