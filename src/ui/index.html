@@ -358,7 +358,7 @@ function speakerRow(r, app) {
       : h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
     h('div', {},
       h('p', { class: 'title' }, np ? np.title : ext ? (ext.state === 'PLAYING' ? 'Playing another source' : 'Paused on another source')
-        : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
+        : r.power === 'standby' ? 'Standby' : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
       h('p', { class: 'artist' }, np ? np.artist : ext ? externalText(ext)
         : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app')),
       np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',

@@ -85,6 +85,7 @@ Open `http://<host>:8080/` in a browser. It has five views:
   - its own icon, and a **Device page** link that opens the speaker's web page (settings, inputs) in a new tab, when the speaker has one;
   - the volume it reports, with dB where the speaker gives it (as an AV receiver's display shows it);
   - **Playing another source** when it's busy with something that isn't Tube2U[PnP], such as Spotify, radio or another input, with the title when the speaker tells.
+  - On Yamaha MusicCast devices (AV receivers, speakers), these come from Yamaha Extended Control as well, because UPnP only sees their own DLNA playback. Then the page also shows the tuner station, net radio or HDMI input, **Standby**, and the master volume in dB as the display shows it.
 
   Speakers found once are remembered, with a fixed port, and stay on the list:
   - **Offline** when a remembered speaker stops answering (it's checked every `DEVICE_CHECK_INTERVAL` seconds). Its cast receiver stops, so it leaves the cast menu, and starts again on the same port when the speaker is back.

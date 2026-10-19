@@ -8,6 +8,7 @@ import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
 import { fmt as fmtSec } from './sponsorblock.js';
 import { stats } from './stats.js';
+import { YamahaExtendedControl } from './yamaha.js';
 
 // A next track that can't be prepared (unavailable, age-restricted, 403s) is retried
 // after this long, doubling per failure - not on every poll.
@@ -39,6 +40,8 @@ export class Renderer extends Player {
   #scpd = { rc: null, avt: null }; // { actions, ranges } of RenderingControl and AVTransport
   #external = null;        // what the renderer plays when it isn't playing for us
   #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
+  #yxc = null;             // Yamaha Extended Control client, for MusicCast devices
+  #vendor = null;          // last YXC status: { power, input, inputText, volume, playing }
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -157,6 +160,7 @@ export class Renderer extends Player {
     }
     const icon = pickIcon(desc.icons ?? []);
     if (icon) this.icon = await fetchIcon(icon.url).catch(() => null);
+    this.#yxc = await this.#findYxc(desc);
     await this.refreshStatus();
 
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
@@ -616,18 +620,24 @@ export class Renderer extends Player {
 
   /** Read the volume for the status page (the device checks call this; so does playback polling). */
   async refreshVolume() {
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: false });
+    return this.#volume;
+  }
+
+  async #refreshUpnpVolume() {
     await this.doGetVolume();
     if (this.#scpd.rc?.actions.has('GetVolumeDB')) {
       const r = await this.#safeCall('RenderingControl', 'GetVolumeDB', { InstanceID: 0, Channel: 'Master' });
       const v = Number.parseInt(r?.CurrentVolume, 10);
       this.#volumeDb = Number.isFinite(v) ? Math.round((v / this.#volumeDbUnit) * 10) / 10 : null;
     }
-    return this.#volume;
   }
 
   /** Everything the status page shows besides our own playback. Called by the device checks. */
   async refreshStatus() {
-    await this.refreshVolume();
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: !this.#current });
     await this.#refreshExternal();
     if (this.#scpd.avt?.actions.has('GetCurrentTransportActions')) {
       const r = await this.#safeCall('AVTransport', 'GetCurrentTransportActions', { InstanceID: 0 });
@@ -635,10 +645,45 @@ export class Renderer extends Player {
     }
   }
 
+  /**
+   * A Yamaha MusicCast device announces its YXC API in the description. Some Yamaha
+   * descriptions don't, so for those the standard path is tried on the same host.
+   */
+  async #findYxc(desc) {
+    if (desc.yxcBase) return new YamahaExtendedControl(desc.yxcBase);
+    if (!/yamaha/i.test(desc.manufacturer)) return null;
+    const guess = new YamahaExtendedControl(new URL('/YamahaExtendedControl/v1/', this.location).toString());
+    return await guess.works() ? guess : null;
+  }
+
+  async #refreshVendor(opts) {
+    try {
+      const s = await this.#yxc.status(opts);
+      // A volume-only read keeps what the last full read found playing.
+      if (!opts.withPlayInfo && this.#vendor?.input === s.input) s.playing = this.#vendor.playing;
+      if (!this.#vendor) this.log.debug(`Yamaha Extended Control: ${s.power}, input ${s.input}`);
+      this.#vendor = s;
+    } catch (err) {
+      if (this.#vendor) this.log.debug('Yamaha Extended Control failed:', err.message);
+      this.#vendor = null; // the UPnP numbers are shown instead
+    }
+  }
+
   /** Is the renderer busy with something else (Spotify, radio, another input)? Only asked while we're idle. */
   async #refreshExternal() {
     if (this.#current) {
       this.#external = null;
+      return;
+    }
+    // UPnP only sees the device's own DLNA playback (its "server" input). YXC knows the
+    // tuner, net radio, Spotify, HDMI... and that a speaker in standby plays nothing.
+    const v = this.#vendor;
+    if (v && (v.power !== 'on' || v.input !== 'server')) {
+      const p = v.playing;
+      this.#external = v.power !== 'on' || p?.playback === 'stop' ? null : {
+        state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
+        title: p?.title ?? null, artist: p?.artist ?? null, source: v.inputText,
+      };
       return;
     }
     const state = await this.#transportState();
@@ -659,6 +704,14 @@ export class Renderer extends Player {
 
   /** Volume as a percentage of the device's own range. */
   #volumeInfo() {
+    // YXC has the master volume as the display shows it; RenderingControl may not follow it.
+    const y = this.#vendor?.volume;
+    if (y) {
+      return {
+        level: Math.round(((Math.min(y.max, Math.max(0, y.raw))) / y.max) * 100), raw: y.raw, min: 0, max: y.max,
+        muted: y.muted, rangeKnown: true, db: y.db ?? this.#volumeDb,
+      };
+    }
     const v = this.#volume;
     if (!v) return null;
     const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
@@ -752,6 +805,7 @@ export class Renderer extends Player {
       presentationURL: this.description?.presentationURL ?? null,
       icon: Boolean(this.icon),
       external: this.#external,
+      power: this.#vendor?.power ?? null,
       actions: {
         supported: this.#scpd.avt ? [...this.#scpd.avt.actions].sort() : null,
         allowed: this.#allowedActions,

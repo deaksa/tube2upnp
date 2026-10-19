@@ -8,6 +8,7 @@
 
 import et from 'elementtree';
 import { MIME_ALIASES } from './formats.js';
+import { yxcBaseFrom } from './yamaha.js';
 
 const MEDIA_RENDERER = /urn:schemas-upnp-org:device:MediaRenderer:\d/;
 
@@ -74,6 +75,7 @@ export function parseDescription(xml, location) {
       })).filter((i) => i.url);
       return icons.length ? icons : null;
     }) ?? [],
+    yxcBase: yxcBaseFrom(root, location),
     services,
   };
 }

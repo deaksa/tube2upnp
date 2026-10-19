@@ -4,6 +4,8 @@ import { parseMessage, udnFromUsn, maxAge } from '../src/ssdp.js';
 import { parseDescription, buildDidl, sinkAccepts, pickIcon, parseScpd, didlTitle } from '../src/upnp.js';
 import { parseHms } from '../src/renderer.js';
 import { urlExpiry, mimeFor, Resolver } from '../src/resolver.js';
+import { yxcBaseFrom } from '../src/yamaha.js';
+import et from 'elementtree';
 
 test('SSDP parsing handles CRLF, case and missing headers', () => {
   const { startLine, headers } = parseMessage(Buffer.from(
@@ -118,4 +120,18 @@ test('DIDL title for "playing another source"', () => {
   assert.equal(didlTitle(''), null);
   assert.equal(didlTitle('NOT_IMPLEMENTED'), null);
   assert.equal(didlTitle('<DIDL-Lite><item><dc:title>broken'), null);
+});
+
+test('yxcBaseFrom: the YXC URL from a Yamaha description, only on the device itself', () => {
+  const desc = (urlBase, control) => et.parse(`<root xmlns="urn:schemas-upnp-org:device-1-0"><device/>
+    <yamaha:X_device xmlns:yamaha="urn:schemas-yamaha-com:device-1-0"><yamaha:X_URLBase>${urlBase}</yamaha:X_URLBase>
+    <yamaha:X_serviceList><yamaha:X_service><yamaha:X_yxcControlURL>${control}</yamaha:X_yxcControlURL>
+    </yamaha:X_service></yamaha:X_serviceList></yamaha:X_device></root>`).getroot();
+  const loc = 'http://192.168.0.131:49154/MediaRenderer/desc.xml';
+  assert.equal(yxcBaseFrom(desc('http://192.168.0.131:80/', '/YamahaExtendedControl/v1/'), loc),
+    'http://192.168.0.131/YamahaExtendedControl/v1/');
+  assert.equal(yxcBaseFrom(desc('', '/YamahaExtendedControl/v1'), loc), 'http://192.168.0.131:49154/YamahaExtendedControl/v1/');
+  assert.equal(yxcBaseFrom(desc('http://evil.example/', '/YamahaExtendedControl/v1/'), loc), null, 'another host');
+  assert.equal(yxcBaseFrom(desc('', 'file:///etc/'), loc), null);
+  assert.equal(yxcBaseFrom(et.parse('<root><device/></root>').getroot(), loc), null);
 });

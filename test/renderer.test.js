@@ -609,3 +609,62 @@ test('playing another source is reported while we are idle, with its title', asy
   assert.equal(r.statusInfo().external, null, 'one of our own streams left loaded');
   await r.destroy();
 });
+
+test('Yamaha Extended Control: input, what plays on it, standby, master volume in dB', async (t) => {
+  const fake = await startFakeRenderer({ yamaha: {} });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  let info = r.statusInfo();
+  assert.equal(info.external, null, 'the server input is ours to watch over UPnP');
+  assert.equal(info.power, 'on');
+  assert.deepEqual(info.volume, { level: 7, raw: 12, min: 0, max: 161, muted: false, rangeKnown: true, db: -74.5 },
+    'the master volume as the display shows it, not RenderingControl (30)');
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'tuner', input_text: 'TUNER' };
+  fake.state.yxc.tuner = { band: 'fm', fm: { freq: 103900 }, rds: { program_service: 'PETOFI', radio_text_a: '' } };
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'PETOFI', artist: 'FM 103.90 MHz', source: 'TUNER' },
+    'UPnP says STOPPED, YXC knows the radio plays');
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'net_radio', input_text: 'NET RADIO' };
+  fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: 'Jazz FM', artist: '', album: '' };
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO' });
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'hdmi1', input_text: 'TV', volume: 80, mute: true };
+  await r.refreshStatus();
+  info = r.statusInfo();
+  assert.deepEqual(info.external, { state: 'PLAYING', title: null, artist: null, source: 'TV' });
+  assert.equal(info.volume.level, 50);
+  assert.equal(info.volume.muted, true);
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, power: 'standby' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null, 'nothing plays in standby');
+  assert.equal(r.statusInfo().power, 'standby');
+  await r.destroy();
+});
+
+test('Yamaha Extended Control: found on a Yamaha that does not announce it; UPnP numbers when it fails', async (t) => {
+  const fake = await startFakeRenderer({ yamaha: { announce: false, main: { input: 'tuner', input_text: 'TUNER' } } });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.equal(r.statusInfo().external?.source, 'TUNER');
+
+  fake.state.yxc.broken = true;
+  await r.refreshStatus();
+  const info = r.statusInfo();
+  assert.equal(info.external, null, 'back to UPnP, which sees nothing playing');
+  assert.equal(info.power, null);
+  assert.equal(info.volume.raw, 30);
+  await r.destroy();
+
+  const plain = await startFakeRenderer();
+  t.after(() => plain.server.close());
+  const other = setup(plain);
+  await other.r.init();
+  assert.ok(!plain.calls.some((c) => c.service === 'YXC'), 'not asked of other makes');
+  await other.r.destroy();
+});
