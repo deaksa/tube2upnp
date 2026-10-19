@@ -24,7 +24,9 @@ function make({ dataDir = mkdtempSync(path.join(tmpdir(), 'dev-')), init = () =>
     removeData: async (udn) => { removedData.push(udn); },
     createRenderer: (p) => {
       const r = {
-        ...p, name: `🔊 ${p.udn}`, description: { friendlyName: p.udn, manufacturer: 'Acme', modelName: 'Box' },
+        ...p, name: `🔊 ${p.udn}`,
+        description: { friendlyName: p.udn, manufacturer: 'Acme', modelName: 'Box', presentationURL: `http://${p.udn}.lan/` },
+        icon: { type: 'image/png', data: Buffer.from(p.udn) },
         status: 0, refreshes: 0,
         async init() {
           const ok = await init(p);
@@ -33,7 +35,7 @@ function make({ dataDir = mkdtempSync(path.join(tmpdir(), 'dev-')), init = () =>
         },
         async destroy() { destroyed.push(p.udn); live.delete(p.udn); },
         refresh() {},
-        async refreshVolume() { r.refreshes++; },
+        async refreshStatus() { r.refreshes++; },
         statusInfo: () => ({ id: p.udn, name: r.name, volume: { level: 40, raw: 40, min: 0, max: 100, muted: false } }),
       };
       return r;
@@ -112,7 +114,7 @@ test('during playback a speaker gets twice as long before it is taken offline', 
   assert.equal(d.state('kitchen'), 'offline');
 });
 
-test('an answering speaker is checked quietly and its volume refreshed', async () => {
+test('an answering speaker is checked quietly and its status refreshed', async () => {
   const d = make();
   await d.m.load();
   await d.seen('kitchen');
@@ -254,4 +256,32 @@ test('concurrent discovery and checks start a speaker once', async () => {
   await d.m.gone('kitchen');
   await Promise.all([d.seen('kitchen'), d.m.checkAll(), d.seen('kitchen')]);
   assert.deepEqual(d.started, [['kitchen', 3000], ['kitchen', 3000]]);
+});
+
+test('online time, dropouts and check round trip are tracked; icon and device page stay while offline', async () => {
+  const d = make();
+  await d.m.load();
+  await d.seen('kitchen');
+  await d.m.checkAll();
+  let row = d.m.list()[0];
+  assert.equal(row.onlineForS, 0);
+  assert.equal(row.dropouts, 0);
+  assert.equal(typeof row.checkMs, 'number');
+  d.tick(90_000);
+  assert.equal(d.m.list()[0].onlineForS, 90);
+
+  d.reachable.delete(loc('kitchen'));
+  for (let i = 0; i < 3; i++) await d.m.checkAll();
+  row = d.m.list()[0];
+  assert.equal(row.state, 'offline');
+  assert.equal(row.onlineForS, null);
+  assert.equal(row.dropouts, 1);
+  assert.equal(row.presentationURL, 'http://kitchen.lan/');
+  assert.equal(row.icon, true);
+  assert.equal(d.m.icon('kitchen').data.toString(), 'kitchen');
+  assert.equal(d.m.icon('nope'), null);
+
+  const again = make({ dataDir: d.dataDir });
+  await again.m.load();
+  assert.equal(again.m.list()[0].presentationURL, 'http://kitchen.lan/', 'device page remembered across restarts');
 });

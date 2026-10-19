@@ -17,7 +17,8 @@ import { PLAYER_STATUSES } from 'yt-cast-receiver';
 const RETRY_FAILED_MS = 5 * 60 * 1000;
 const RETRY_TERMINATED_MS = 30 * 1000;
 const STATE_ORDER = { online: 0, starting: 1, error: 2, offline: 3, ignored: 4 };
-const SAVED_FIELDS = ['port', 'name', 'friendlyName', 'manufacturer', 'model', 'location', 'address', 'lastSeen', 'ignored'];
+const SAVED_FIELDS = ['port', 'name', 'friendlyName', 'manufacturer', 'model', 'presentationURL', 'location', 'address',
+  'lastSeen', 'ignored'];
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 
@@ -79,7 +80,8 @@ export class DeviceManager {
     return {
       udn, port: null, name: null, friendlyName: null, manufacturer: '', model: '', location: null, address: null,
       lastSeen: null, ignored: false, saved: false, state: 'offline', error: null, retryAt: 0, misses: 0,
-      renderer: null, lastVolume: null, lock: Promise.resolve(), ...fields,
+      renderer: null, lastVolume: null, icon: null, presentationURL: null,
+      onlineSince: null, dropouts: 0, checkMs: null, lock: Promise.resolve(), ...fields,
     };
   }
 
@@ -138,13 +140,15 @@ export class DeviceManager {
   }
 
   async #check(rec) {
+    const t = performance.now();
     const ok = await this.probe(rec.location).catch(() => false);
     if (!this.#known.has(rec.udn) || rec.ignored) return;
     if (ok) {
+      rec.checkMs = Math.round(performance.now() - t);
       rec.misses = 0;
       rec.lastSeen = this.now();
       if (rec.state === 'online') {
-        try { await rec.renderer.refreshVolume?.(); } catch { /* shown as unknown */ }
+        try { await rec.renderer.refreshStatus?.(); } catch { /* shown as unknown */ }
       }
       else if (rec.state === 'offline' || (rec.state === 'error' && rec.retryAt <= this.now())) {
         await this.#serial(rec, () => (rec.state === 'online' ? null : this.#start(rec)));
@@ -198,6 +202,7 @@ export class DeviceManager {
       state: 'online', error: null, retryAt: 0, misses: 0, lastSeen: this.now(), saved: true,
       name: r.name, friendlyName: r.description?.friendlyName ?? r.name,
       manufacturer: r.description?.manufacturer ?? '', model: r.description?.modelName ?? '',
+      presentationURL: r.description?.presentationURL ?? null, icon: r.icon ?? rec.icon, onlineSince: this.now(),
     });
     this.#skipped.delete(rec.udn);
     await this.#save();
@@ -215,6 +220,8 @@ export class DeviceManager {
   async #takeOffline(rec, why) {
     await this.#stopRenderer(rec);
     rec.state = 'offline';
+    rec.onlineSince = null;
+    rec.dropouts++;
     this.log.info(`${rec.name} ${why} - offline, its receiver left the cast menu (port ${rec.port} kept)`);
   }
 
@@ -276,6 +283,11 @@ export class DeviceManager {
     this.log.info(`${rec.name ?? udn} is allowed again`);
   }
 
+  /** The speaker's icon (kept while it's offline), for the status page. */
+  icon(udn) {
+    return this.#known.get(udn)?.icon ?? null;
+  }
+
   #lookup(udn) {
     const rec = this.#known.get(udn);
     if (!rec) throw httpError(404, 'Unknown speaker');
@@ -293,11 +305,14 @@ export class DeviceManager {
           id: rec.udn, state: rec.state, dialPort: rec.port, error: rec.error,
           lastSeenS: rec.lastSeen ? Math.round((now - rec.lastSeen) / 1000) : null,
           retryInS: rec.state === 'error' ? Math.max(0, Math.round((rec.retryAt - now) / 1000)) : null,
+          onlineForS: rec.onlineSince ? Math.round((now - rec.onlineSince) / 1000) : null,
+          dropouts: rec.dropouts, checkMs: rec.checkMs, icon: Boolean(rec.icon),
         };
         if (rec.state === 'online') return { ...rec.renderer.statusInfo(), ...brief };
         return {
           ...brief, name: rec.name ?? rec.udn, friendlyName: rec.friendlyName ?? rec.name ?? rec.udn,
           manufacturer: rec.manufacturer, model: rec.model, address: rec.address, volume: rec.lastVolume,
+          presentationURL: rec.presentationURL,
         };
       });
   }

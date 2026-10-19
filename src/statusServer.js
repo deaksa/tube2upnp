@@ -193,6 +193,17 @@ export function startStatusServer(config, { devices, mediaServer, settings, hist
       if (!tokenOk(config, req, url)) return json(res, 401, { error: 'Missing or wrong token. Open the page as /?token=…' });
 
       if (req.method === 'GET' && url.pathname === '/api/logs/stream') return streamLogs(req, res, url);
+      const iconPath = req.method === 'GET' && /^\/api\/renderers\/([^/]+)\/icon$/.exec(url.pathname);
+      if (iconPath) {
+        // The device's own icon, fetched by us: the page's CSP doesn't allow LAN http images.
+        const icon = devices.icon(speakerId(iconPath[1]));
+        if (!icon) return json(res, 404, { error: 'No icon' });
+        res.writeHead(200, {
+          ...SECURITY_HEADERS, 'Content-Type': icon.type, 'Content-Length': icon.data.length,
+          'Cache-Control': 'private, max-age=3600', 'Content-Security-Policy': "default-src 'none'",
+        }).end(icon.data);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/history.csv') {
         // BOM: Excel otherwise reads the UTF-8 as ANSI and mangles accented titles.
         const csv = '﻿' + playHistory().toCsv({ speaker: url.searchParams.get('speaker') });

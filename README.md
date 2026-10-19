@@ -81,7 +81,12 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 Open `http://<host>:8080/` in a browser. It has five views:
 
-- **Speakers** shows each renderer's display: cover, title, progress, the prepared next track, and the speaker's volume as it reports it. Speakers found once are remembered, with a fixed port, and stay on the list:
+- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. For each speaker it also shows:
+  - its own icon, and a **Device page** link that opens the speaker's web page (settings, inputs) in a new tab, when the speaker has one;
+  - the volume it reports, with dB where the speaker gives it (as an AV receiver's display shows it);
+  - **Playing another source** when it's busy with something that isn't Tube2U[PnP], such as Spotify, radio or another input, with the title when the speaker tells.
+
+  Speakers found once are remembered, with a fixed port, and stay on the list:
   - **Offline** when a remembered speaker stops answering (it's checked every `DEVICE_CHECK_INTERVAL` seconds). Its cast receiver stops, so it leaves the cast menu, and starts again on the same port when the speaker is back.
   - **Not working** when it answers but its receiver couldn't start (the reason is shown, and it's retried).
   - **Remove** forgets an offline speaker: its port and saved settings are freed, and it's set up as new if it comes back. **Ignore** stops a speaker and keeps it out until you choose **Allow again** under *Ignored speakers*.
@@ -97,7 +102,7 @@ Open `http://<host>:8080/` in a browser. It has five views:
   - yt-dlp lookup times (median and 95th percentile) and cache hits
   - downloads, 403 retries, MP4/FLAC build times, and the disk cache
   - UPnP round trips
-  - per speaker: accepted formats, gapless support, and SOAP errors
+  - per speaker: accepted formats, gapless support, SOAP errors, how long it has been online (and dropouts since start), the round trip of its reachability check, and the transport actions it implements and allows right now
 - **Settings:** SponsorBlock on or off, and which categories to skip.
 
 The page is meant for your LAN. If other people or devices share that network, set `STATUS_TOKEN` and open the page as `/?token=<token>`. You can also limit it to one address with `STATUS_BIND`, or turn it off with `STATUS_PORT=0`. Requests that change settings must come from the page itself, so other websites can't send them from your browser.

@@ -2,7 +2,7 @@
 
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
-import { fetchDescription, fetchVolumeRange, buildDidl, sinkAccepts } from './upnp.js';
+import { fetchDescription, fetchScpd, fetchIcon, pickIcon, didlTitle, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
@@ -34,6 +34,11 @@ export class Renderer extends Player {
   #polls = 0;
   #volume = null;          // { raw, muted } last read from the renderer, for the status page
   #volumeRange = null;     // { min, max } of its Volume variable (SCPD), when it says
+  #volumeDb = null;        // dB as the device itself shows it (GetVolumeDB), when it has that
+  #volumeDbUnit = 256;     // GetVolumeDB is in 1/256 dB per the spec; some devices send plain dB
+  #scpd = { rc: null, avt: null }; // { actions, ranges } of RenderingControl and AVTransport
+  #external = null;        // what the renderer plays when it isn't playing for us
+  #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -69,6 +74,7 @@ export class Renderer extends Player {
     this.log = deps.logger.child(`[${address}]`);
     this.name = null;
     this.description = null;
+    this.icon = null; // { type, data }: served by the status page (its CSP blocks LAN http images)
     this.nowPlaying = null;
     this.lastError = null;
     this.refresh(maxAge);
@@ -137,10 +143,21 @@ export class Renderer extends Player {
       this.log.debug('GetProtocolInfo failed (will assume source format works):', err.message);
     }
 
-    // UPnP leaves the volume scale to the device (0-100 is common, not universal).
-    this.#volumeRange = await fetchVolumeRange(desc.services['urn:upnp-org:serviceId:RenderingControl']?.SCPDURL)
-      .catch(() => null);
-    await this.refreshVolume();
+    // What the device implements, from its service descriptions: the volume scale (UPnP
+    // leaves it to the device), whether it reports dB, and its transport actions. Optional
+    // calls are only made when listed, so they don't pile up as SOAP errors.
+    const scpd = (svc) => fetchScpd(desc.services[`urn:upnp-org:serviceId:${svc}`]?.SCPDURL).catch(() => null);
+    [this.#scpd.rc, this.#scpd.avt] = await Promise.all([scpd('RenderingControl'), scpd('AVTransport')]);
+    this.#volumeRange = this.#scpd.rc?.ranges.Volume ?? null;
+    if (this.#scpd.rc?.actions.has('GetVolumeDBRange')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDBRange', { InstanceID: 0, Channel: 'Master' });
+      // A range within +-200 can't be 1/256 dB units (that would be under 1 dB): plain dB.
+      const span = Math.max(Math.abs(Number(r?.MinValue) || 0), Math.abs(Number(r?.MaxValue) || 0));
+      if (span && span <= 200) this.#volumeDbUnit = 1;
+    }
+    const icon = pickIcon(desc.icons ?? []);
+    if (icon) this.icon = await fetchIcon(icon.url).catch(() => null);
+    await this.refreshStatus();
 
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
@@ -600,7 +617,44 @@ export class Renderer extends Player {
   /** Read the volume for the status page (the device checks call this; so does playback polling). */
   async refreshVolume() {
     await this.doGetVolume();
+    if (this.#scpd.rc?.actions.has('GetVolumeDB')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDB', { InstanceID: 0, Channel: 'Master' });
+      const v = Number.parseInt(r?.CurrentVolume, 10);
+      this.#volumeDb = Number.isFinite(v) ? Math.round((v / this.#volumeDbUnit) * 10) / 10 : null;
+    }
     return this.#volume;
+  }
+
+  /** Everything the status page shows besides our own playback. Called by the device checks. */
+  async refreshStatus() {
+    await this.refreshVolume();
+    await this.#refreshExternal();
+    if (this.#scpd.avt?.actions.has('GetCurrentTransportActions')) {
+      const r = await this.#safeCall('AVTransport', 'GetCurrentTransportActions', { InstanceID: 0 });
+      if (r) this.#allowedActions = (r.Actions ?? '').split(',').map((a) => a.trim()).filter(Boolean);
+    }
+  }
+
+  /** Is the renderer busy with something else (Spotify, radio, another input)? Only asked while we're idle. */
+  async #refreshExternal() {
+    if (this.#current) {
+      this.#external = null;
+      return;
+    }
+    const state = await this.#transportState();
+    if (state !== 'PLAYING' && state !== 'PAUSED_PLAYBACK') {
+      this.#external = null;
+      return;
+    }
+    const m = await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 });
+    const uri = m?.CurrentURI ?? '';
+    if (/\/stream\/[0-9a-f]{32}\./.test(uri)) { // still one of ours
+      this.#external = null;
+      return;
+    }
+    const p = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+    const meta = didlTitle(p?.TrackMetaData) ?? didlTitle(m?.CurrentURIMetaData);
+    this.#external = { state, title: meta?.title ?? null, artist: meta?.artist ?? null, source: sourceOf(uri) };
   }
 
   /** Volume as a percentage of the device's own range. */
@@ -611,7 +665,7 @@ export class Renderer extends Player {
     const clamped = Math.min(max, Math.max(min, v.raw));
     return {
       level: Math.round(((clamped - min) / (max - min)) * 100), raw: v.raw, min, max, muted: v.muted,
-      rangeKnown: Boolean(this.#volumeRange),
+      rangeKnown: Boolean(this.#volumeRange), db: this.#volumeDb,
     };
   }
 
@@ -695,6 +749,13 @@ export class Renderer extends Player {
       sponsorblock: this.#sb.videoId && this.#sb.videoId === this.#current?.video.id
         ? { segments: this.#sb.segments, skipped: this.#sb.skipped.size } : null,
       lastError: this.lastError,
+      presentationURL: this.description?.presentationURL ?? null,
+      icon: Boolean(this.icon),
+      external: this.#external,
+      actions: {
+        supported: this.#scpd.avt ? [...this.#scpd.avt.actions].sort() : null,
+        allowed: this.#allowedActions,
+      },
       format: {
         mode: this.formatMode, override: this.#formatOverride, global: this.cfg.outputFormat,
         learned: this.#learnedFormat, current: this.#current?.format ?? null,
@@ -845,6 +906,20 @@ export class Renderer extends Player {
       await this.next();
     }
   }
+}
+
+/** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
+function sourceOf(uri) {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri ?? '')?.[1]?.toLowerCase();
+  if (!scheme) return null;
+  if (scheme === 'http' || scheme === 'https') {
+    try {
+      return new URL(uri).hostname;
+    } catch {
+      return null;
+    }
+  }
+  return scheme.replace(/^x-(sonos-|rincon-)?/, ''); // x-sonos-spotify -> spotify
 }
 
 function hms(sec) {

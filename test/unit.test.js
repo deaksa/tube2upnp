@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseMessage, udnFromUsn, maxAge } from '../src/ssdp.js';
-import { parseDescription, buildDidl, sinkAccepts } from '../src/upnp.js';
+import { parseDescription, buildDidl, sinkAccepts, pickIcon, parseScpd, didlTitle } from '../src/upnp.js';
 import { parseHms } from '../src/renderer.js';
 import { urlExpiry, mimeFor, Resolver } from '../src/resolver.js';
 
@@ -84,4 +84,38 @@ test('yt-dlp info JSON is private and never written through a planted symlink', 
   assert.equal(readFileSync(victim, 'utf8'), 'keep me', 'symlink target untouched');
   assert.equal(readFileSync(dest, 'utf8').trim(), 'audio');
   assert.ok(!existsSync(`${dest}.info.json`), 'removed afterwards');
+});
+
+test('device page and icons: only web URLs, from the renderer or its root device', () => {
+  const desc = (page, icons) => parseDescription(`<?xml version="1.0"?><root><device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType><friendlyName>X</friendlyName>
+    ${page ? `<presentationURL>${page}</presentationURL>` : ''}${icons}</device></root>`, 'http://10.0.0.2:1400/desc.xml');
+  assert.equal(desc('/web', '').presentationURL, 'http://10.0.0.2:1400/web');
+  assert.equal(desc('javascript:alert(1)', '').presentationURL, null);
+  assert.equal(desc('', '').presentationURL, null);
+  const icons = desc('', `<iconList>
+    <icon><mimetype>image/png</mimetype><width>256</width><url>/big.png</url></icon>
+    <icon><mimetype>image/jpeg</mimetype><width>64</width><url>/mid.jpg</url></icon>
+    <icon><mimetype>image/png</mimetype><width>60</width><url>/small.png</url></icon>
+    <icon><mimetype>image/svg+xml</mimetype><width>64</width><url>/logo.svg</url></icon>
+    <icon><mimetype>image/png</mimetype><width>64</width><url>file:///etc/passwd</url></icon></iconList>`).icons;
+  assert.equal(icons.length, 4, 'the file: URL is dropped');
+  assert.equal(pickIcon(icons).url, 'http://10.0.0.2:1400/small.png', 'a raster image near 64 px, PNG when about as close, never SVG');
+  assert.equal(pickIcon([]), null);
+});
+
+test('SCPD: actions and allowed ranges', () => {
+  const s = parseScpd(`<scpd><actionList><action><name>GetVolume</name></action><action><name>GetVolumeDB</name></action></actionList>
+    <serviceStateTable><stateVariable><name>Volume</name><allowedValueRange><minimum>0</minimum><maximum>80</maximum></allowedValueRange></stateVariable>
+    <stateVariable><name>Mute</name></stateVariable></serviceStateTable></scpd>`);
+  assert.deepEqual([...s.actions], ['GetVolume', 'GetVolumeDB']);
+  assert.deepEqual(s.ranges, { Volume: { min: 0, max: 80 } });
+});
+
+test('DIDL title for "playing another source"', () => {
+  assert.deepEqual(didlTitle('<DIDL-Lite xmlns:dc="x" xmlns:upnp="y"><item><dc:title>Song</dc:title><upnp:artist>Band</upnp:artist></item></DIDL-Lite>'),
+    { title: 'Song', artist: 'Band' });
+  assert.equal(didlTitle(''), null);
+  assert.equal(didlTitle('NOT_IMPLEMENTED'), null);
+  assert.equal(didlTitle('<DIDL-Lite><item><dc:title>broken'), null);
 });

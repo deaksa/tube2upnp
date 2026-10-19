@@ -528,12 +528,12 @@ test('volume for the status page: read at start, scaled to the device range, ref
   t.after(() => fake.server.close());
   const { r } = setup(fake);
   await r.init();
-  assert.deepEqual(r.statusInfo().volume, { level: 38, raw: 30, min: 0, max: 80, muted: false, rangeKnown: true });
+  assert.deepEqual(r.statusInfo().volume, { level: 38, raw: 30, min: 0, max: 80, muted: false, rangeKnown: true, db: null });
 
   await r.doPlay({ id: A }, 0);
   Object.assign(fake.state, { volume: 60, muted: true }); // turned up on the device, then muted
   await until(() => r.statusInfo().volume.raw === 60);
-  assert.deepEqual(r.statusInfo().volume, { level: 75, raw: 60, min: 0, max: 80, muted: true, rangeKnown: true });
+  assert.deepEqual(r.statusInfo().volume, { level: 75, raw: 60, min: 0, max: 80, muted: true, rangeKnown: true, db: null });
 
   assert.equal(await r.doSetVolume({ level: 20, muted: false }), true);
   assert.equal(r.statusInfo().volume.raw, 20, 'a change from the app shows at once');
@@ -546,6 +546,66 @@ test('volume: a device without a range in its SCPD is assumed to be 0-100', asyn
   t.after(() => fake.server.close());
   const { r } = setup(fake);
   await r.init();
-  assert.deepEqual(r.statusInfo().volume, { level: 30, raw: 30, min: 0, max: 100, muted: false, rangeKnown: false });
+  assert.deepEqual(r.statusInfo().volume, { level: 30, raw: 30, min: 0, max: 100, muted: false, rangeKnown: false, db: null });
+  await r.destroy();
+});
+
+test('speaker details: device page, icon, volume in dB, transport actions', async (t) => {
+  const fake = await startFakeRenderer({ page: true, volumeDb: -9088, transportActions: 'Play,Stop,Seek' });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  const info = r.statusInfo();
+  assert.equal(info.presentationURL, new URL('/web/index.html', fake.location).toString(), 'from the root device');
+  assert.equal(info.icon, true);
+  assert.equal(r.icon.type, 'image/png', 'the 48 px PNG, not the 120 px JPEG');
+  assert.equal(info.volume.db, -35.5, '-9088 / 256');
+  assert.ok(info.actions.supported.includes('Seek') && info.actions.supported.includes('SetNextAVTransportURI'));
+  assert.deepEqual(info.actions.allowed, ['Play', 'Stop', 'Seek']);
+  await r.destroy();
+});
+
+test('volume in dB: plain dB when the device range says so; not asked when not listed', async (t) => {
+  const fake = await startFakeRenderer({ volumeDb: -35, volumeDbRange: [-80, 16] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.equal(r.statusInfo().volume.db, -35);
+  await r.destroy();
+
+  const plain = await startFakeRenderer();
+  t.after(() => plain.server.close());
+  const other = setup(plain);
+  await other.r.init();
+  assert.equal(other.r.statusInfo().volume.db, null);
+  assert.ok(!plain.calls.some((c) => c.action === 'GetVolumeDB'), 'no call the device does not list');
+  assert.equal(other.r.statusInfo().presentationURL, null);
+  assert.equal(other.r.statusInfo().icon, false);
+  await other.r.destroy();
+});
+
+test('playing another source is reported while we are idle, with its title', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  Object.assign(fake.state, {
+    transport: 'PLAYING', currentUri: 'x-sonos-spotify:spotify%3atrack%3a1',
+    metaData: '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+      + '<item><dc:title>Bohemian Rhapsody</dc:title><dc:creator>Queen</dc:creator></item></DIDL-Lite>',
+  });
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'Bohemian Rhapsody', artist: 'Queen', source: 'spotify' });
+
+  Object.assign(fake.state, { transport: 'PAUSED_PLAYBACK', currentUri: 'http://radio.example:8000/live', metaData: '' });
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: null, artist: null, source: 'radio.example' });
+
+  await r.doPlay({ id: A }, 0); // now we play: not "another source"
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null);
+  await r.doStop();
+  Object.assign(fake.state, { transport: 'PAUSED_PLAYBACK', currentUri: 'http://10.0.0.5:8000/stream/' + 'a'.repeat(32) + '.m4a' });
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null, 'one of our own streams left loaded');
   await r.destroy();
 });
