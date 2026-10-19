@@ -119,7 +119,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 |---|---|---|
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` |
 | `ADVERTISE_IP` | auto | IP that renderers and phones use to reach us. By default it's auto-detected per renderer from the routing table. Setting it also pins DIAL to that address. |
-| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each renderer takes the next free port. |
+| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each renderer gets its own port and keeps it across restarts (remembered in `DATA_DIR/ports.json`; delete the file to reassign). |
 | `MEDIA_PORT` | `8000` | Streaming port |
 | `STATUS_PORT` | `8080` | Status page. `0` disables it. |
 | `STATUS_TOKEN` | – | If set, the status page's API requires this token (open the page as `/?token=…`) |

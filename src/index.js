@@ -9,6 +9,7 @@ import { stats } from './stats.js';
 import { Settings } from './settings.js';
 import { SponsorBlock, CATEGORIES } from './sponsorblock.js';
 import { History } from './history.js';
+import { PortRegistry } from './ports.js';
 import { readFileSync } from 'node:fs';
 import { MediaServer } from './mediaServer.js';
 import { Renderer } from './renderer.js';
@@ -22,6 +23,7 @@ const resolver = new Resolver(config, log.child('[yt-dlp]'));
 const mediaServer = new MediaServer(config, resolver, log.child('[media]'));
 const ssdp = new Ssdp(log.child('[ssdp]'));
 const settings = new Settings(config, log.child('[settings]'));
+const ports = new PortRegistry(config, log.child('[ports]'));
 const sponsorblock = new SponsorBlock(config, settings, log.child('[sponsorblock]'));
 const history = config.history ? new History(config, log.child('[history]')) : null;
 
@@ -31,14 +33,6 @@ const renderers = new Map();
 const skipped = new Map();
 /** udn currently initialising */
 const pending = new Set();
-const usedPorts = new Set();
-
-function allocPort() {
-  let p = config.receiverBasePort;
-  while (usedPorts.has(p)) p++;
-  usedPorts.add(p);
-  return p;
-}
 
 async function onAlive(headers, rinfo) {
   const type = headers.ST ?? headers.NT ?? '';
@@ -65,7 +59,7 @@ async function onAlive(headers, rinfo) {
   if (pending.has(udn)) return;
 
   pending.add(udn);
-  const port = allocPort();
+  const port = ports.claim(udn);
   const r = new Renderer({
     udn, location, address: rinfo.address, maxAge: age, port,
     deps: { config, resolver, mediaServer, sponsorblock, history, logger: log },
@@ -75,14 +69,15 @@ async function onAlive(headers, rinfo) {
     if (ok) {
       renderers.set(udn, r);
       skipped.delete(udn);
+      await ports.remember(udn, port);
     } else {
-      usedPorts.delete(port);
+      ports.release(port);
       skipped.set(udn, { location, until: Infinity });
     }
   } catch (err) {
     log.warn(`Could not set up renderer at ${location}: ${err.message} (retry in ${RETRY_FAILED_MS / 60000} min)`);
     await r.destroy();
-    usedPorts.delete(port);
+    ports.release(port);
     skipped.set(udn, { location, until: Date.now() + RETRY_FAILED_MS });
   } finally {
     pending.delete(udn);
@@ -94,7 +89,7 @@ async function removeRenderer(udn) {
   if (!r) return;
   renderers.delete(udn);
   await r.destroy();
-  usedPorts.delete(r.port);
+  ports.release(r.port);
   log.info(`Removed renderer ${r.name}`);
 }
 
@@ -143,6 +138,7 @@ async function shutdown(sig) {
 
 async function main() {
   await settings.load();
+  await ports.load();
   await history?.load();
   const unknown = config.sponsorblockCategories.filter((c) => !CATEGORIES[c]);
   if (unknown.length) log.warn(`Unknown SPONSORBLOCK_CATEGORIES ignored by SponsorBlock: ${unknown.join(', ')}`);
