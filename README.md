@@ -8,13 +8,29 @@ Run Tube2U[PnP] on any always-on machine on your LAN. It discovers every UPnP/DL
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant App as 📱 YouTube app
+    participant RX as Tube2U[PnP]<br/>cast receiver
+    participant MS as Tube2U[PnP]<br/>media server
+    participant YT as YouTube
+    participant SPK as 🔊 UPnP/DLNA speaker
+
+    Note over RX,SPK: SSDP finds the speakers on the LAN, one cast receiver each
+    App->>RX: Cast (DIAL + lounge): play this video
+    RX->>YT: yt-dlp: video ID → stream URL
+    RX->>SPK: UPnP SOAP: play /stream/#lt;token#gt;
+    SPK->>MS: HTTP GET /stream/#lt;token#gt;
+    MS->>YT: HTTPS: fetch the audio
+    MS-->>SPK: as-is, losslessly remuxed (ffmpeg) or MP3
+    loop while playing
+        RX->>SPK: poll state and position, queue the next track
+    end
+    App->>RX: pause · seek · skip · volume
+    RX->>SPK: UPnP SOAP
 ```
-YouTube app ──DIAL/lounge──▶ Tube2U[PnP] (one cast receiver per renderer)
-                                 │ yt-dlp resolves the video ID to a stream URL
-                                 ▼
-Renderer ◀──HTTP /stream/<token>── media server ──HTTPS──▶ googlevideo.com
-         (as-is, losslessly remuxed with ffmpeg, or MP3 as a last resort)
-```
+
+The speaker never talks to YouTube itself: it plays a short link on Tube2U[PnP]'s media server, which passes the audio through as-is, remuxes it losslessly with ffmpeg, or transcodes it to MP3 as a last resort.
 
 ### Stream formats
 
