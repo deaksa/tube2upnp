@@ -138,6 +138,8 @@
     vertical-align: middle; margin-right: .4rem; overflow: hidden; }
   .vol > i { display: block; height: 100%; background: var(--muted); }
   .speaker.away { opacity: .75; }
+  .dev-icon { width: 1.6rem; height: 1.6rem; object-fit: contain; border-radius: .3rem; flex: none; }
+  .device a { color: inherit; }
   .ignored { max-width: 42rem; color: var(--muted); font-size: .9rem; }
   .ignored ul { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .4rem; }
 
@@ -349,13 +351,18 @@ function renderSpeakers(app) {
 function speakerRow(r, app) {
   const np = r.nowPlaying;
   const playing = r.transport === 'PLAYING';
-  const ledClass = r.lastError ? 'err' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
+  const ext = !np && r.external ? r.external : null; // busy with something that isn't us
+  const ledClass = r.lastError ? 'err' : ext ? 'warn' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
   const display = h('div', { class: 'display' + (np ? '' : ' idle') },
     np?.thumbnail ? h('img', { class: 'cover', src: np.thumbnail, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' })
+      : ext?.art != null ? h('img', { class: 'cover', alt: '', src: '/api/renderers/' + encodeURIComponent(r.id) + '/art?v=' + encodeURIComponent(ext.art)
+        + (token ? '&token=' + encodeURIComponent(token) : '') })
       : h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
     h('div', {},
-      h('p', { class: 'title' }, np ? np.title : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
-      h('p', { class: 'artist' }, np ? np.artist : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app')),
+      h('p', { class: 'title' }, np ? np.title : ext ? (ext.state === 'PLAYING' ? 'Playing another source' : 'Paused on another source')
+        : r.power === 'standby' ? 'Standby' : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
+      h('p', { class: 'artist' }, np ? np.artist : ext ? externalText(ext)
+        : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app')),
       np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
         'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
       Array.from({ length: 40 }, () => h('i'))), h('span', { class: 'time', 'data-time': r.id })) : null,
@@ -384,9 +391,10 @@ function speakerRow(r, app) {
   return h('article', { class: 'speaker', 'aria-label': r.name },
     display,
     h('div', { class: 'controls' },
-      h('h2', { class: 'name' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), r.friendlyName || r.name),
-      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address),
+      h('h2', { class: 'name' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), iconImg(r), r.friendlyName || r.name),
+      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address, devicePage(r)),
       volumeLine(r.volume),
+      ext ? h('p', { class: 'hint' }, 'Casting to it takes over from what it is playing now.') : null,
       r.senders.length ? h('p', { class: 'senders' }, 'Connected: ' + r.senders.join(', ')) : null,
       h('label', { class: 'field' }, 'Stream format', sel),
       fmtHint.length || r.format.learned ? h('p', { class: 'hint' }, fmtHint.join(' '), ' ',
@@ -410,6 +418,23 @@ function speakerRow(r, app) {
 
 const STATE_TEXT = { offline: 'Offline', starting: 'Starting…', error: 'Not working' };
 
+function iconImg(r) {
+  if (!r.icon) return null;
+  return h('img', { class: 'dev-icon', alt: '', loading: 'lazy', onerror: (e) => e.target.remove(),
+    src: '/api/renderers/' + encodeURIComponent(r.id) + '/icon' + (token ? '?token=' + encodeURIComponent(token) : '') });
+}
+
+/** Link to the speaker's own web page (settings, inputs), in a new tab. */
+function devicePage(r) {
+  if (!r.presentationURL) return null;
+  return [' · ', h('a', { href: r.presentationURL, target: '_blank', rel: 'noopener noreferrer' }, 'Device\u00a0page\u00a0↗')];
+}
+
+function externalText(ext) {
+  const what = [ext.title, ext.artist].filter(Boolean).join(' – ');
+  return what ? what + (ext.source ? ' (' + ext.source + ')' : '') : ext.source ? 'From ' + ext.source : 'Not from Tube2U[PnP]';
+}
+
 function fmtAgo(s) {
   if (s == null) return 'never';
   if (s < 60) return 'just now';
@@ -427,7 +452,8 @@ function volumeLine(v, lastKnown = false) {
   const range = v.rangeKnown && (v.min !== 0 || v.max !== 100) ? ' (' + v.raw + ' of ' + v.max + ')' : '';
   return h('p', { class: 'device', title: 'Volume as reported by the speaker' },
     h('span', { class: 'vol', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.max(0, Math.min(100, v.level)) + '%' })),
-    'Volume ' + v.level + '%' + range + (v.muted ? ' · muted' : '') + (lastKnown ? ' (last known)' : ''));
+    'Volume ' + v.level + '%' + range + (v.db != null ? ' · ' + (v.db > 0 ? '+' : v.db < 0 ? '−' : '') + Math.abs(v.db).toFixed(1) + '\u00a0dB' : '')
+      + (v.muted ? ' · muted' : '') + (lastKnown ? ' (last known)' : ''));
 }
 
 function speakerAction(r, action, label, question) {
@@ -452,9 +478,9 @@ function awayRow(r) {
       h('div', {}, h('p', { class: 'title' }, STATE_TEXT[r.state] || r.state), h('p', { class: 'artist' }, detail))),
     h('div', { class: 'controls' },
       h('h2', { class: 'name' }, h('span', { class: 'led ' + (r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : ''),
-        'aria-hidden': 'true' }), name),
+        'aria-hidden': 'true' }), iconImg(r), name),
       h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + (r.address ? ' at ' + r.address : '')
-        + (r.dialPort ? ' · port ' + r.dialPort + ' kept for it' : '')),
+        + (r.dialPort ? ' · port ' + r.dialPort + ' kept for it' : ''), devicePage(r)),
       volumeLine(r.volume, true),
       r.error ? h('p', { class: 'error' }, r.error) : null,
       r.state === 'starting' ? null : h('div', { class: 'row' },
@@ -624,7 +650,11 @@ async function refreshStats() {
           ['Format setting', r.format.override ?? 'default (' + r.format.global + ')'], ['Detected format', r.format.learned || '–'],
           ['Gapless support', r.gapless == null ? 'not tested yet' : r.gapless ? 'yes' : 'no'],
           ['SOAP calls / errors', r.soap.calls + ' / ' + r.soap.errors], ['Average round trip', ms(r.soap.avgMs)],
-          ['Status polls', r.polls], ['Last seen', r.lastSeenS + ' s ago'], ['Volume', r.volume ? r.volume.raw + ' (range ' + r.volume.min + '–' + r.volume.max + (r.volume.rangeKnown ? '' : ', assumed') + ')' : '–'],
+          ['Status polls', r.polls], ['Last seen', r.lastSeenS + ' s ago'],
+          ['Online for', (r.onlineForS != null ? fmtDur(r.onlineForS) : '–') + (r.dropouts ? ' (' + r.dropouts + ' dropout' + (r.dropouts === 1 ? '' : 's') + ' since start)' : '')],
+          ['Reachability check', r.checkMs != null ? ms(r.checkMs) : '–'],
+          ['Transport actions', r.actions?.supported ? r.actions.supported.filter((a) => !a.startsWith('Get')).join(', ') : 'not reported'],
+          ['Allowed now', r.actions?.allowed ? r.actions.allowed.join(', ') || 'none' : 'not reported'], ['Volume', r.volume ? r.volume.raw + ' (range ' + r.volume.min + '–' + r.volume.max + (r.volume.rangeKnown ? '' : ', assumed') + ')' : '–'],
           ['Accepts', r.sink.length ? r.sink.join(', ') : 'not reported']])))));
   } catch (e) { toast(e.message); }
 }

@@ -193,6 +193,19 @@ export function startStatusServer(config, { devices, mediaServer, settings, hist
       if (!tokenOk(config, req, url)) return json(res, 401, { error: 'Missing or wrong token. Open the page as /?token=…' });
 
       if (req.method === 'GET' && url.pathname === '/api/logs/stream') return streamLogs(req, res, url);
+      const imagePath = req.method === 'GET' && /^\/api\/renderers\/([^/]+)\/(icon|art)$/.exec(url.pathname);
+      if (imagePath) {
+        // The device's own icon, or the cover of what it plays, fetched by us: the page's CSP
+        // doesn't allow LAN http images. A new cover gets a new ?v=, so caching is fine.
+        const id = speakerId(imagePath[1]);
+        const img = imagePath[2] === 'icon' ? devices.icon(id) : devices.art?.(id);
+        if (!img) return json(res, 404, { error: imagePath[2] === 'icon' ? 'No icon' : 'No cover' });
+        res.writeHead(200, {
+          ...SECURITY_HEADERS, 'Content-Type': img.type, 'Content-Length': img.data.length,
+          'Cache-Control': 'private, max-age=3600', 'Content-Security-Policy': "default-src 'none'",
+        }).end(img.data);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/history.csv') {
         // BOM: Excel otherwise reads the UTF-8 as ANSI and mangles accented titles.
         const csv = '﻿' + playHistory().toCsv({ speaker: url.searchParams.get('speaker') });

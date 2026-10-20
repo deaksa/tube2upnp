@@ -1,13 +1,15 @@
 // One UPnP MediaRenderer exposed as one YouTube cast receiver.
 
+import { createHash } from 'node:crypto';
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
-import { fetchDescription, fetchVolumeRange, buildDidl, sinkAccepts } from './upnp.js';
+import { fetchDescription, fetchScpd, fetchIcon, pickIcon, didlTitle, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
 import { fmt as fmtSec } from './sponsorblock.js';
 import { stats } from './stats.js';
+import { YamahaExtendedControl } from './yamaha.js';
 
 // A next track that can't be prepared (unavailable, age-restricted, 403s) is retried
 // after this long, doubling per failure - not on every poll.
@@ -34,6 +36,13 @@ export class Renderer extends Player {
   #polls = 0;
   #volume = null;          // { raw, muted } last read from the renderer, for the status page
   #volumeRange = null;     // { min, max } of its Volume variable (SCPD), when it says
+  #volumeDb = null;        // dB as the device itself shows it (GetVolumeDB), when it has that
+  #volumeDbUnit = 256;     // GetVolumeDB is in 1/256 dB per the spec; some devices send plain dB
+  #scpd = { rc: null, avt: null }; // { actions, ranges } of RenderingControl and AVTransport
+  #external = null;        // what the renderer plays when it isn't playing for us
+  #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
+  #yxc = null;             // Yamaha Extended Control client, for MusicCast devices
+  #vendor = null;          // last YXC status: { power, input, inputText, volume, playing }
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -69,6 +78,7 @@ export class Renderer extends Player {
     this.log = deps.logger.child(`[${address}]`);
     this.name = null;
     this.description = null;
+    this.icon = null; // { type, data }: served by the status page (its CSP blocks LAN http images)
     this.nowPlaying = null;
     this.lastError = null;
     this.refresh(maxAge);
@@ -137,10 +147,22 @@ export class Renderer extends Player {
       this.log.debug('GetProtocolInfo failed (will assume source format works):', err.message);
     }
 
-    // UPnP leaves the volume scale to the device (0-100 is common, not universal).
-    this.#volumeRange = await fetchVolumeRange(desc.services['urn:upnp-org:serviceId:RenderingControl']?.SCPDURL)
-      .catch(() => null);
-    await this.refreshVolume();
+    // What the device implements, from its service descriptions: the volume scale (UPnP
+    // leaves it to the device), whether it reports dB, and its transport actions. Optional
+    // calls are only made when listed, so they don't pile up as SOAP errors.
+    const scpd = (svc) => fetchScpd(desc.services[`urn:upnp-org:serviceId:${svc}`]?.SCPDURL).catch(() => null);
+    [this.#scpd.rc, this.#scpd.avt] = await Promise.all([scpd('RenderingControl'), scpd('AVTransport')]);
+    this.#volumeRange = this.#scpd.rc?.ranges.Volume ?? null;
+    if (this.#scpd.rc?.actions.has('GetVolumeDBRange')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDBRange', { InstanceID: 0, Channel: 'Master' });
+      // A range within +-200 can't be 1/256 dB units (that would be under 1 dB): plain dB.
+      const span = Math.max(Math.abs(Number(r?.MinValue) || 0), Math.abs(Number(r?.MaxValue) || 0));
+      if (span && span <= 200) this.#volumeDbUnit = 1;
+    }
+    const icon = pickIcon(desc.icons ?? []);
+    if (icon) this.icon = await fetchIcon(icon.url).catch(() => null);
+    this.#yxc = await this.#findYxc(desc);
+    await this.refreshStatus();
 
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
@@ -599,19 +621,130 @@ export class Renderer extends Player {
 
   /** Read the volume for the status page (the device checks call this; so does playback polling). */
   async refreshVolume() {
-    await this.doGetVolume();
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: false });
     return this.#volume;
+  }
+
+  async #refreshUpnpVolume() {
+    await this.doGetVolume();
+    if (this.#scpd.rc?.actions.has('GetVolumeDB')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDB', { InstanceID: 0, Channel: 'Master' });
+      const v = Number.parseInt(r?.CurrentVolume, 10);
+      this.#volumeDb = Number.isFinite(v) ? Math.round((v / this.#volumeDbUnit) * 10) / 10 : null;
+    }
+  }
+
+  /** Everything the status page shows besides our own playback. Called by the device checks. */
+  async refreshStatus() {
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: !this.#current });
+    await this.#refreshExternal();
+    if (this.#scpd.avt?.actions.has('GetCurrentTransportActions')) {
+      const r = await this.#safeCall('AVTransport', 'GetCurrentTransportActions', { InstanceID: 0 });
+      if (r) this.#allowedActions = (r.Actions ?? '').split(',').map((a) => a.trim()).filter(Boolean);
+    }
+  }
+
+  /**
+   * A Yamaha MusicCast device announces its YXC API in the description. Some Yamaha
+   * descriptions don't, so for those the standard path is tried on the same host: on
+   * port 80, where MusicCast serves it (the description is on another port, like 49154),
+   * then on the description's port.
+   */
+  async #findYxc(desc) {
+    if (desc.yxcBase) return new YamahaExtendedControl(desc.yxcBase);
+    if (!/yamaha/i.test(desc.manufacturer)) return null;
+    const loc = new URL(this.location);
+    const bases = new Set([`http://${loc.hostname}/YamahaExtendedControl/v1/`,
+      new URL('/YamahaExtendedControl/v1/', loc).toString()]);
+    for (const base of bases) {
+      const guess = new YamahaExtendedControl(base);
+      if (await guess.works()) return guess;
+    }
+    return null;
+  }
+
+  /** The cover of what plays on another source, fetched once per URL (Yamaha changes the URL per track). */
+  async #refreshArt(url) {
+    if (url === (this.art?.url ?? null)) return;
+    const img = url ? await fetchIcon(url, { maxBytes: 1024 * 1024 }).catch(() => null) : null;
+    // Remember a failed URL too, so it isn't fetched again on every check. The version is
+    // the image's hash, so the page's cached cover is never one from before a restart.
+    this.art = url ? {
+      url, type: img?.type ?? null, data: img?.data ?? null,
+      version: img ? createHash('sha256').update(img.data).digest('hex').slice(0, 16) : null,
+    } : null;
+  }
+
+  async #refreshVendor(opts) {
+    try {
+      const s = await this.#yxc.status(opts);
+      // A volume-only read keeps what the last full read found playing.
+      if (!opts.withPlayInfo && this.#vendor?.input === s.input) s.playing = this.#vendor.playing;
+      if (!this.#vendor) this.log.debug(`Yamaha Extended Control: ${s.power}, input ${s.input}`);
+      this.#vendor = s;
+    } catch (err) {
+      if (this.#vendor) this.log.debug('Yamaha Extended Control failed:', err.message);
+      this.#vendor = null; // the UPnP numbers are shown instead
+    }
+  }
+
+  /** Is the renderer busy with something else (Spotify, radio, another input)? Only asked while we're idle. */
+  async #refreshExternal() {
+    if (this.#current) {
+      this.#external = null;
+      this.art = null;
+      return;
+    }
+    // UPnP only sees the device's own DLNA playback (its "server" input). YXC knows the
+    // tuner, net radio, Spotify, HDMI... and that a speaker in standby plays nothing.
+    const v = this.#vendor;
+    if (v && (v.power !== 'on' || v.input !== 'server')) {
+      const p = v.playing;
+      const off = v.power !== 'on' || p?.playback === 'stop';
+      await this.#refreshArt(off ? null : p?.art ?? null);
+      this.#external = off ? null : {
+        state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
+        title: p?.title ?? null, artist: p?.artist ?? null, source: p?.station ?? v.inputText,
+        art: this.art?.version ?? null,
+      };
+      return;
+    }
+    this.art = null;
+    const state = await this.#transportState();
+    if (state !== 'PLAYING' && state !== 'PAUSED_PLAYBACK') {
+      this.#external = null;
+      return;
+    }
+    const m = await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 });
+    const uri = m?.CurrentURI ?? '';
+    if (/\/stream\/[0-9a-f]{32}\./.test(uri)) { // still one of ours
+      this.#external = null;
+      return;
+    }
+    const p = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+    const meta = didlTitle(p?.TrackMetaData) ?? didlTitle(m?.CurrentURIMetaData);
+    this.#external = { state, title: meta?.title ?? null, artist: meta?.artist ?? null, source: sourceOf(uri) };
   }
 
   /** Volume as a percentage of the device's own range. */
   #volumeInfo() {
+    // YXC has the master volume as the display shows it; RenderingControl may not follow it.
+    const y = this.#vendor?.volume;
+    if (y) {
+      return {
+        level: Math.round(((Math.min(y.max, Math.max(0, y.raw))) / y.max) * 100), raw: y.raw, min: 0, max: y.max,
+        muted: y.muted, rangeKnown: true, db: y.db ?? this.#volumeDb,
+      };
+    }
     const v = this.#volume;
     if (!v) return null;
     const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
     const clamped = Math.min(max, Math.max(min, v.raw));
     return {
       level: Math.round(((clamped - min) / (max - min)) * 100), raw: v.raw, min, max, muted: v.muted,
-      rangeKnown: Boolean(this.#volumeRange),
+      rangeKnown: Boolean(this.#volumeRange), db: this.#volumeDb,
     };
   }
 
@@ -680,7 +813,7 @@ export class Renderer extends Player {
       name: this.name,
       friendlyName: this.description?.friendlyName ?? null,
       manufacturer: this.description?.manufacturer ?? '',
-      model: [this.description?.modelName, this.description?.modelNumber].filter(Boolean).join(' '),
+      model: modelText(this.description),
       address: this.address,
       advertisedIp: this.#ip,
       dialPort: this.port,
@@ -695,6 +828,14 @@ export class Renderer extends Player {
       sponsorblock: this.#sb.videoId && this.#sb.videoId === this.#current?.video.id
         ? { segments: this.#sb.segments, skipped: this.#sb.skipped.size } : null,
       lastError: this.lastError,
+      presentationURL: this.description?.presentationURL ?? null,
+      icon: Boolean(this.icon),
+      external: this.#external,
+      power: this.#vendor?.power ?? null,
+      actions: {
+        supported: this.#scpd.avt ? [...this.#scpd.avt.actions].sort() : null,
+        allowed: this.#allowedActions,
+      },
       format: {
         mode: this.formatMode, override: this.#formatOverride, global: this.cfg.outputFormat,
         learned: this.#learnedFormat, current: this.#current?.format ?? null,
@@ -845,6 +986,27 @@ export class Renderer extends Player {
       await this.next();
     }
   }
+}
+
+/** "RX-V4A", not "RX-V4A V4A": some devices repeat the model number in the name. */
+function modelText(desc) {
+  const name = desc?.modelName ?? '';
+  const number = desc?.modelNumber ?? '';
+  return number && !name.includes(number) ? [name, number].filter(Boolean).join(' ') : name;
+}
+
+/** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
+function sourceOf(uri) {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri ?? '')?.[1]?.toLowerCase();
+  if (!scheme) return null;
+  if (scheme === 'http' || scheme === 'https') {
+    try {
+      return new URL(uri).hostname;
+    } catch {
+      return null;
+    }
+  }
+  return scheme.replace(/^x-(sonos-|rincon-)?/, ''); // x-sonos-spotify -> spotify
 }
 
 function hms(sec) {
