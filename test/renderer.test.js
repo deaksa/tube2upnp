@@ -636,7 +636,7 @@ test('Yamaha Extended Control: input, what plays on it, standby, master volume i
   const ext = r.statusInfo().external;
   assert.deepEqual({ ...ext, art: undefined }, { state: 'PLAYING', title: "Queen - Don't Stop Me Now", artist: null,
     source: 'FM 103.9 A ROCK (Budapest/Hungarian)', art: undefined }, 'the station is the source');
-  assert.equal(typeof ext.art, 'number', 'a cover to show');
+  assert.match(ext.art, /^[0-9a-f]{16}$/, 'a cover to show, versioned by its content');
   assert.equal(r.art.type, 'image/png');
   assert.match(r.art.data.toString(), /AlbumART2229/);
   await r.refreshStatus();
@@ -651,6 +651,10 @@ test('Yamaha Extended Control: input, what plays on it, standby, master volume i
   fake.state.yxc.netusb = { ...fake.state.yxc.netusb, albumart_url: 'http://evil.example/x.png' };
   await r.refreshStatus();
   assert.equal(r.statusInfo().external.art, null, 'never fetched from another host');
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, albumart_url: '/YamahaRemoteControl/moved' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, null, 'redirects are not followed (they could lead anywhere)');
+  assert.ok(!fake.calls.some((c) => c.url === '/YamahaRemoteControl/AlbumART/moved.png'));
 
   fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: '', artist: 'Jazz FM', album: '' };
   await r.refreshStatus();

@@ -96,6 +96,9 @@ export function startFakeRenderer({ sink = 'http-get:*:audio/mpeg:*,http-get:*:a
         res.setHeader('Content-Type', 'application/json');
         return res.end(JSON.stringify({ response_code: 0, ...state.yxc[y[1]] }));
       }
+      if (state.yxc && req.url === '/YamahaRemoteControl/moved') {
+        return res.writeHead(302, { Location: '/YamahaRemoteControl/AlbumART/moved.png' }).end();
+      }
       if (state.yxc && req.url.startsWith('/YamahaRemoteControl/AlbumART/')) {
         calls.push({ service: 'YXC', action: 'albumart', url: req.url });
         res.writeHead(200, { 'Content-Type': 'image/png' });

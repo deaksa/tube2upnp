@@ -1,5 +1,6 @@
 // One UPnP MediaRenderer exposed as one YouTube cast receiver.
 
+import { createHash } from 'node:crypto';
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
 import { fetchDescription, fetchScpd, fetchIcon, pickIcon, didlTitle, buildDidl, sinkAccepts } from './upnp.js';
@@ -42,7 +43,6 @@ export class Renderer extends Player {
   #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
   #yxc = null;             // Yamaha Extended Control client, for MusicCast devices
   #vendor = null;          // last YXC status: { power, input, inputText, volume, playing }
-  #artVersion = 0;         // changes with the cover, so the page doesn't show a cached one
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
@@ -648,22 +648,33 @@ export class Renderer extends Player {
 
   /**
    * A Yamaha MusicCast device announces its YXC API in the description. Some Yamaha
-   * descriptions don't, so for those the standard path is tried on the same host.
+   * descriptions don't, so for those the standard path is tried on the same host: on
+   * port 80, where MusicCast serves it (the description is on another port, like 49154),
+   * then on the description's port.
    */
   async #findYxc(desc) {
     if (desc.yxcBase) return new YamahaExtendedControl(desc.yxcBase);
     if (!/yamaha/i.test(desc.manufacturer)) return null;
-    const guess = new YamahaExtendedControl(new URL('/YamahaExtendedControl/v1/', this.location).toString());
-    return await guess.works() ? guess : null;
+    const loc = new URL(this.location);
+    const bases = new Set([`http://${loc.hostname}/YamahaExtendedControl/v1/`,
+      new URL('/YamahaExtendedControl/v1/', loc).toString()]);
+    for (const base of bases) {
+      const guess = new YamahaExtendedControl(base);
+      if (await guess.works()) return guess;
+    }
+    return null;
   }
 
   /** The cover of what plays on another source, fetched once per URL (Yamaha changes the URL per track). */
   async #refreshArt(url) {
     if (url === (this.art?.url ?? null)) return;
     const img = url ? await fetchIcon(url, { maxBytes: 1024 * 1024 }).catch(() => null) : null;
-    // Remember a failed URL too, so it isn't fetched again on every check.
-    this.art = url ? { url, type: img?.type ?? null, data: img?.data ?? null } : null;
-    this.#artVersion++;
+    // Remember a failed URL too, so it isn't fetched again on every check. The version is
+    // the image's hash, so the page's cached cover is never one from before a restart.
+    this.art = url ? {
+      url, type: img?.type ?? null, data: img?.data ?? null,
+      version: img ? createHash('sha256').update(img.data).digest('hex').slice(0, 16) : null,
+    } : null;
   }
 
   async #refreshVendor(opts) {
@@ -696,7 +707,7 @@ export class Renderer extends Player {
       this.#external = off ? null : {
         state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
         title: p?.title ?? null, artist: p?.artist ?? null, source: p?.station ?? v.inputText,
-        art: this.art?.data ? this.#artVersion : null,
+        art: this.art?.version ?? null,
       };
       return;
     }
@@ -977,7 +988,6 @@ export class Renderer extends Player {
   }
 }
 
-/** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
 /** "RX-V4A", not "RX-V4A V4A": some devices repeat the model number in the name. */
 function modelText(desc) {
   const name = desc?.modelName ?? '';
@@ -985,6 +995,7 @@ function modelText(desc) {
   return number && !name.includes(number) ? [name, number].filter(Boolean).join(' ') : name;
 }
 
+/** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
 function sourceOf(uri) {
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri ?? '')?.[1]?.toLowerCase();
   if (!scheme) return null;

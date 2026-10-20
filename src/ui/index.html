@@ -355,7 +355,7 @@ function speakerRow(r, app) {
   const ledClass = r.lastError ? 'err' : ext ? 'warn' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
   const display = h('div', { class: 'display' + (np ? '' : ' idle') },
     np?.thumbnail ? h('img', { class: 'cover', src: np.thumbnail, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' })
-      : ext?.art != null ? h('img', { class: 'cover', alt: '', src: '/api/renderers/' + encodeURIComponent(r.id) + '/art?v=' + ext.art
+      : ext?.art != null ? h('img', { class: 'cover', alt: '', src: '/api/renderers/' + encodeURIComponent(r.id) + '/art?v=' + encodeURIComponent(ext.art)
         + (token ? '&token=' + encodeURIComponent(token) : '') })
       : h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
     h('div', {},

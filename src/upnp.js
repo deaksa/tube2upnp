@@ -123,7 +123,8 @@ const MAX_ICON_BYTES = 256 * 1024;
  * LAN http images). Raster images only, and not too big: the bytes are kept in memory.
  */
 export async function fetchIcon(url, { timeoutMs = 5000, maxBytes = MAX_ICON_BYTES } = {}) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  // No redirects: covers are only fetched from the device itself, a redirect could go anywhere.
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
   const type = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
   if (!res.ok || !ICON_TYPES.test(type)) return null;
   if (Number(res.headers.get('content-length')) > maxBytes) return null;

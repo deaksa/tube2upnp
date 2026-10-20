@@ -34,7 +34,8 @@ export class YamahaExtendedControl {
   }
 
   async #get(path) {
-    const res = await this.fetch(new URL(path, this.base), { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    // No redirects: the base URL was checked to be on the device itself, a redirect could go anywhere.
+    const res = await this.fetch(new URL(path, this.base), { signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'error' });
     if (!res.ok) throw new Error(`YXC ${path}: HTTP ${res.status}`);
     const body = await res.json();
     if (body?.response_code !== 0) throw new Error(`YXC ${path}: response_code ${body?.response_code}`);
