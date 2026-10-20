@@ -10,7 +10,7 @@ import { Logger } from '../src/logger.js';
 
 const loc = (udn) => `http://10.0.0.${udn.length}/${udn}.xml`;
 
-function make({ dataDir = mkdtempSync(path.join(tmpdir(), 'dev-')), init = () => true, ...cfg } = {}) {
+function make({ dataDir = mkdtempSync(path.join(tmpdir(), 'dev-')), init = () => true, destroy = async () => {}, ...cfg } = {}) {
   const started = [];   // [udn, port] per successful init
   const destroyed = [];
   const removedData = [];
@@ -33,7 +33,7 @@ function make({ dataDir = mkdtempSync(path.join(tmpdir(), 'dev-')), init = () =>
           if (ok) { started.push([p.udn, p.port]); live.set(p.udn, r); }
           return ok;
         },
-        async destroy() { destroyed.push(p.udn); live.delete(p.udn); },
+        async destroy() { destroyed.push(p.udn); live.delete(p.udn); await destroy(p); },
         refresh() {},
         async refreshStatus() { r.refreshes++; },
         statusInfo: () => ({ id: p.udn, name: r.name, volume: { level: 40, raw: 40, min: 0, max: 100, muted: false } }),
@@ -284,4 +284,54 @@ test('online time, dropouts and check round trip are tracked; icon and device pa
   const again = make({ dataDir: d.dataDir });
   await again.m.load();
   assert.equal(again.m.list()[0].presentationURL, 'http://kitchen.lan/', 'device page remembered across restarts');
+});
+
+test('a speaker being stopped is not used: SSDP, the status page and checks during a slow destroy', async () => {
+  let release;
+  const slow = new Promise((resolve) => { release = resolve; });
+  const a = make({ destroy: () => slow });
+  await a.m.load();
+  await a.seen('kitchen');
+
+  // Byebye: destroy() hangs (a Stop to a rebooting speaker waits for the SOAP timeout).
+  const bye = a.m.gone('kitchen');
+  await new Promise((resolve) => setImmediate(resolve));
+  // The speaker is back and announces itself; this used to throw (no renderer) and crash the process.
+  const alive = a.seen('kitchen');
+  assert.equal(a.state('kitchen'), 'offline', 'listed without the renderer that is going');
+  const check = a.m.checkAll(); // waits its turn behind the stop
+  release();
+  await Promise.all([bye, alive, check]);
+  assert.equal(a.state('kitchen'), 'online', 'the alive brings it back once the old receiver is gone');
+  assert.deepEqual(a.started, [['kitchen', 3000], ['kitchen', 3000]]);
+});
+
+test('repeated byebyes take a speaker offline once; a byebye after Ignore leaves it ignored', async () => {
+  const a = make();
+  await a.m.load();
+  await a.seen('kitchen');
+  await Promise.all([a.m.gone('kitchen'), a.m.gone('kitchen'), a.m.gone('kitchen')]);
+  assert.deepEqual(a.destroyed, ['kitchen'], 'stopped once');
+
+  await a.seen('lamp');
+  const ignored = a.m.ignore('lamp');
+  const bye = a.m.gone('lamp');
+  await Promise.all([ignored, bye]);
+  assert.equal(a.state('lamp'), 'ignored');
+  assert.equal(a.m.list().find((d) => d.id === 'lamp').dialPort, null);
+});
+
+test('a check that waited behind Ignore does not start the ignored speaker', async () => {
+  let release;
+  const slow = new Promise((resolve) => { release = resolve; });
+  const a = make({ destroy: (p) => (p.udn === 'kitchen' ? slow : null) });
+  await a.m.load();
+  await a.seen('kitchen');
+  const ignored = a.m.ignore('kitchen'); // waits in destroy()
+  a.reachable.add(loc('kitchen'));
+  const check = a.m.checkAll();
+  release();
+  await Promise.all([ignored, check]);
+  assert.equal(a.state('kitchen'), 'ignored');
+  assert.deepEqual(a.started, [['kitchen', 3000]], 'not started again');
 });
