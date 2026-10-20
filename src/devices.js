@@ -109,7 +109,7 @@ export class DeviceManager {
       return Promise.resolve();
     }
     return this.#serial(rec, async () => {
-      if (rec.ignored || !this.#known.has(udn)) return; // ignored or removed meanwhile
+      if (!this.#isCurrent(rec)) return; // ignored or removed meanwhile
       if (rec.state === 'online' && rec.location !== location) {
         // Same speaker, new description URL (rebooted, DHCP change, random port): rebuild.
         this.log.info(`${rec.name} moved to ${location} - restarting its receiver`);
@@ -127,7 +127,9 @@ export class DeviceManager {
   gone(udn) {
     const rec = this.#known.get(udn);
     if (rec?.state !== 'online') return Promise.resolve();
-    return this.#serial(rec, () => this.#takeOffline(rec, 'said goodbye'));
+    // Speakers send byebye two or three times: only the first one finds it online.
+    return this.#serial(rec, () => (rec.state === 'online' && this.#isCurrent(rec)
+      ? this.#takeOffline(rec, 'said goodbye') : null));
   }
 
   /** Check every known speaker directly. Runs every DEVICE_CHECK_INTERVAL seconds. */
@@ -139,7 +141,7 @@ export class DeviceManager {
 
   async #check(rec) {
     const ok = await this.probe(rec.location).catch(() => false);
-    if (!this.#known.has(rec.udn) || rec.ignored) return;
+    if (!this.#isCurrent(rec)) return;
     if (ok) {
       rec.misses = 0;
       rec.lastSeen = this.now();
@@ -147,7 +149,8 @@ export class DeviceManager {
         try { await rec.renderer.refreshVolume?.(); } catch { /* shown as unknown */ }
       }
       else if (rec.state === 'offline' || (rec.state === 'error' && rec.retryAt <= this.now())) {
-        await this.#serial(rec, () => (rec.state === 'online' ? null : this.#start(rec)));
+        // Ignored, removed or started by someone else while this waited its turn: leave it.
+        await this.#serial(rec, () => (rec.state === 'online' || !this.#isCurrent(rec) ? null : this.#start(rec)));
       }
       return;
     }
@@ -156,7 +159,8 @@ export class DeviceManager {
     // A blip during playback shouldn't cut the music: allow it twice as long.
     const playing = rec.renderer.status === PLAYER_STATUSES.PLAYING;
     if (rec.misses >= this.offlineAfter * (playing ? 2 : 1)) {
-      await this.#serial(rec, () => (rec.state === 'online' ? this.#takeOffline(rec, 'stopped answering') : null));
+      await this.#serial(rec, () => (rec.state === 'online' && this.#isCurrent(rec)
+        ? this.#takeOffline(rec, 'stopped answering') : null));
     }
   }
 
@@ -203,13 +207,25 @@ export class DeviceManager {
     await this.#save();
   }
 
+  /**
+   * Stop its receiver. The speaker leaves 'online' before the wait: destroy() can take
+   * seconds (a Stop to a device that's rebooting runs into the SOAP timeout), and in the
+   * meantime SSDP, the checks and the status page must not use the renderer that's going.
+   * Callers set the final state.
+   */
   async #stopRenderer(rec) {
     const r = rec.renderer;
     if (!r) return;
     rec.lastVolume = r.statusInfo?.().volume ?? rec.lastVolume;
     rec.renderer = null;
+    if (rec.state === 'online') rec.state = 'offline';
     this.renderers.delete(rec.udn);
     await r.destroy();
+  }
+
+  /** Still the speaker's record, and not ignored? (A queued step may run after Remove or Ignore.) */
+  #isCurrent(rec) {
+    return !rec.ignored && this.#known.get(rec.udn) === rec;
   }
 
   async #takeOffline(rec, why) {
@@ -294,7 +310,7 @@ export class DeviceManager {
           lastSeenS: rec.lastSeen ? Math.round((now - rec.lastSeen) / 1000) : null,
           retryInS: rec.state === 'error' ? Math.max(0, Math.round((rec.retryAt - now) / 1000)) : null,
         };
-        if (rec.state === 'online') return { ...rec.renderer.statusInfo(), ...brief };
+        if (rec.state === 'online' && rec.renderer) return { ...rec.renderer.statusInfo(), ...brief };
         return {
           ...brief, name: rec.name ?? rec.udn, friendlyName: rec.friendlyName ?? rec.name ?? rec.udn,
           manufacturer: rec.manufacturer, model: rec.model, address: rec.address, volume: rec.lastVolume,
