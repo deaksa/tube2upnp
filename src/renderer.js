@@ -340,6 +340,10 @@ export class Renderer extends Player {
     // A reload of the same video (seek restart, format change) keeps its skip state.
     if (this.#current?.video.id !== item.current.video.id) this.#resetSkips();
     item.current.loadedAt = Date.now();
+    // The YouTube app takes the position from the state we send when the track starts and
+    // counts on by itself. Right after a switch some renderers (Yamaha) still report the
+    // previous track's clock, so the app would run ahead by a whole track: send it again.
+    item.current.resyncAt = Date.now() + (this.cfg.positionResyncMs ?? 4000);
     this.#current = item.current;
     this.nowPlaying = {
       videoId: item.current.video.id, title: item.info.title, artist: item.info.artist,
@@ -972,6 +976,12 @@ export class Renderer extends Player {
           if (this.status === PLAYER_STATUSES.STOPPED) await this.#ok('AVTransport', 'Stop', { InstanceID: 0 });
         }
         return;
+      }
+      const c = this.#current;
+      if (c?.resyncAt && Date.now() >= c.resyncAt && !this.#isStale(this.#position?.uri)
+          && this.status === PLAYER_STATUSES.PLAYING) {
+        c.resyncAt = 0;
+        await this.notifyExternalStateChange(); // same status, the renderer's position now
       }
       this.#maintainNext().catch(() => {}); // background: don't hold up polling
       this.#checkSkip().catch((err) => this.log.debug('SponsorBlock check failed:', err.message));

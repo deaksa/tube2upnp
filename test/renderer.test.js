@@ -697,3 +697,33 @@ test('Yamaha Extended Control: found on a Yamaha that does not announce it; UPnP
   assert.ok(!plain.calls.some((c) => c.service === 'YXC'), 'not asked of other makes');
   await other.r.destroy();
 });
+
+test('the YouTube app gets the position again a few seconds into a track (the renderer may still have the old clock)', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { prefetch: true, gapless: true, positionResyncMs: 300 });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  const yt = (id) => ({ id, client: { key: 'YT' } });
+  const sent = []; // what yt-cast-receiver would send to the app
+  r.on('state', ({ current }) => sent.push([current.queue?.current?.id ?? null, current.status, current.position]));
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.play(yt(A), 0);
+  await until(() => fake.state.nextUri);
+
+  // Like the RX-V4A: right after playing on into B it still reports A's clock (1:08).
+  r.next = async () => r.play(yt(B), 0);
+  r.getUpcomingVideo = () => null;
+  fake.state.relTime = '0:01:08';
+  fake.advance();
+  await until(() => sent.at(-1)?.[0] === B && sent.at(-1)?.[1] === 1); // play() done: B is PLAYING
+  const startedAt = sent.length;
+  assert.equal(sent.at(-1)[2], 68, 'the wrong position the app got at the switch');
+
+  fake.state.relTime = '0:00:04';
+  await until(() => sent.length > startedAt);
+  assert.deepEqual(sent.at(-1), [B, 1, 4], 'corrected: same status, the real position');
+  await wait(400);
+  assert.equal(sent.length, startedAt + 1, 'once per track');
+  await r.destroy();
+});
