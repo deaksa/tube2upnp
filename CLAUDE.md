@@ -29,6 +29,7 @@ Running the actual service needs multicast on the LAN (SSDP/DIAL), so Docker Des
 
 **`Renderer` (src/renderer.js)** is the core. It extends yt-cast-receiver's `Player` and implements `doPlay/doPause/doResume/doStop/doSeek/doSetVolume/doGetPosition/...` by issuing SOAP calls to the device. Key points that span the file:
 - **Polling, not GENA eventing.** `#poll()` (every `POLL_INTERVAL_MS`) drives everything: end-of-track detection (calls `this.next()` to advance the YouTube queue), start-failure fallback to the next format, gapless-switch detection, next-track prefetch (`#maintainNext`), and SponsorBlock skips (`#checkSkip`).
+- **End of track vs. switched off:** a STOPPED renderer only advances the queue when it stopped near the track's end (`#endedNaturally`, from `lastRel`, which ignores a clock reset to 0) or never reported a position. Otherwise the track is shown paused at `stoppedAt`, and `doResume` loads it again from there.
 - **`#loadSeq`** invalidates stale async loads when the user skips quickly. Any new async path that loads media must check it after each await.
 - **`#destroyed`**: after `destroy()` (device gone), in-flight loads, prefetches and polls must not restart polling or touch the device.
 - **`#expectStop`** suppresses poll reactions while *we* are stopping or switching the renderer.
