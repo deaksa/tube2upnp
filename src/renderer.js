@@ -354,7 +354,8 @@ export class Renderer extends Player {
         current.fetched = true;
       },
     };
-    await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
+    const prepared = await this.media.prepare(entry); // mp4/flac: build the file before the renderer asks for it
+    const quality = streamQuality(format, info, prepared?.sourceAudio, this.cfg);
     const streamPath = this.media.register(entry);
     current.streamPath = streamPath;
     const url = `http://${this.#ip}:${this.cfg.mediaPort}${streamPath}`;
@@ -369,7 +370,7 @@ export class Renderer extends Player {
       duration: Math.max(0, info.duration - startAt),
       isVideo: mime.startsWith('video/'),
     });
-    return { current, info, format, mime, url, streamPath, metadata };
+    return { current, info, format, mime, url, streamPath, metadata, quality };
   }
 
   /** Make `item` the current track (after we loaded it, or the renderer switched to it). */
@@ -386,6 +387,7 @@ export class Renderer extends Player {
     this.nowPlaying = {
       videoId: item.current.video.id, title: item.info.title, artist: item.info.artist,
       duration: item.info.duration, format: item.format, thumbnail: item.info.thumbnail,
+      quality: item.quality ?? null,
     };
     this.#position = { rel: item.current.startAt, dur: item.info.duration, at: Date.now() };
     this.lastError = null;
@@ -478,7 +480,7 @@ export class Renderer extends Player {
       this.history.record({
         videoId: c.video.id, info: this.nowPlaying ?? {}, udn: this.udn, speakerName: this.name,
         senders: this.connectedSenders.map((s) => s.user?.name ?? s.name).filter(Boolean),
-        format: c.format, playedS: l.playedMs / 1000,
+        format: c.format, quality: qualityLabel(this.nowPlaying?.quality), playedS: l.playedMs / 1000,
       });
     } catch (err) {
       this.log.warn('Could not record play history:', err.message);
@@ -1094,6 +1096,37 @@ export class Renderer extends Player {
       await this.next();
     }
   }
+}
+
+const CODEC_NAMES = { aac: 'AAC', mp4a: 'AAC', opus: 'Opus', vorbis: 'Vorbis', mp3: 'MP3', flac: 'FLAC' };
+
+/**
+ * What the speaker gets: the source audio (codec, bitrate, sample rate) and what we turn it
+ * into. For mp4/flac it's the file on disk (`probed`), which can predate the current
+ * extraction; otherwise yt-dlp's format. 200 kbps and up is YouTube's high (Premium) tier.
+ */
+export function streamQuality(format, info, probed, cfg = {}) {
+  const src = probed ?? { codec: info.acodec, kbps: info.abr, sampleRate: info.asr };
+  const codecKey = String(src.codec ?? '').toLowerCase().split('.')[0];
+  const codec = CODEC_NAMES[codecKey] ?? (codecKey || null);
+  if (!codec && !src.kbps) return null;
+  const kbps = src.kbps ? Math.round(src.kbps) : null;
+  return {
+    codec, kbps, sampleRate: src.sampleRate || null,
+    youtubeFormat: probed ? null : info.formatId ?? null, // a cached file may come from another one
+    high: (kbps ?? 0) >= 200,
+    output: format,
+    outputKbps: format === 'mp3' ? Number.parseInt(cfg.mp3Bitrate, 10) || null : null,
+  };
+}
+
+/** Short form for the history: "AAC 258 kbps", "MP3 192 kbps from AAC 130 kbps". */
+export function qualityLabel(q) {
+  if (!q) return null;
+  const src = [q.codec, q.kbps ? `${q.kbps} kbps` : null].filter(Boolean).join(' ');
+  if (q.output === 'mp3') return `MP3${q.outputKbps ? ` ${q.outputKbps} kbps` : ''} from ${src}`;
+  if (q.output === 'flac') return `FLAC from ${src}`;
+  return src;
 }
 
 /** "RX-V4A", not "RX-V4A V4A": some devices repeat the model number in the name. */

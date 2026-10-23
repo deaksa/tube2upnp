@@ -109,6 +109,9 @@ export class Resolver {
       duration: Number(j.duration) || 0,
       filesize: Number(fmt.filesize) || 0,
       formatId: fmt.format_id ?? null,
+      acodec: fmt.acodec ?? null,
+      abr: Math.round(Number(fmt.abr) || Number(fmt.tbr) || 0) || null,
+      asr: Number(fmt.asr) || null,
     };
     // Keep yt-dlp's full JSON (non-enumerable, so it never ends up in logs or the API)
     // so downloads can reuse it via --load-info-json instead of extracting again.

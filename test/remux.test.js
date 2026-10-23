@@ -353,3 +353,13 @@ test('covers: a YouTube thumbnail is served as a square 480x480 JPEG over HTTP',
   assert.equal(fallback.headers.get('location'), broken);
   assert.equal((await fetch(`${base}/art/${'0'.repeat(32)}.jpg`)).status, 404);
 });
+
+test('prepare() reports the audio actually in the cached file (it may predate the current extraction)', { skip: !hasFfmpeg }, async (t) => {
+  const { ms } = await harness(t);
+  const { sourceAudio } = await ms.prepare({ videoId: 'qqqqqqqqqqq', format: 'mp4', ext: 'm4a' });
+  assert.equal(sourceAudio.codec, 'aac');
+  assert.equal(sourceAudio.sampleRate, 44100);
+  assert.ok(sourceAudio.kbps > 50 && sourceAudio.kbps < 200, `about the 128 kbps it was made with: ${sourceAudio.kbps}`);
+  assert.deepEqual(await ms.prepare({ videoId: 'qqqqqqqqqqq', format: 'adts', ext: 'm4a' }), {}, 'streamed formats: nothing to probe');
+  assert.equal(await ms.probeAudio(null), null);
+});

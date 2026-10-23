@@ -50,13 +50,13 @@ test('persists to DATA_DIR/history.json and tolerates a corrupt file', async () 
 
 test('CSV: quoted cells, no spreadsheet formulas, speaker filter', async () => {
   const h = await make().load();
-  play(h, A, 'l', Date.UTC(2026, 0, 2, 3, 4, 5), { info: { title: '=HYPERLINK("x")', artist: 'Ő, the "band"' } });
+  play(h, A, 'l', Date.UTC(2026, 0, 2, 3, 4, 5), { info: { title: '=HYPERLINK("x")', artist: 'Ő, the "band"' }, quality: 'AAC 258 kbps' });
   play(h, B, 'k', 2000);
   const lines = h.toCsv().trim().split('\r\n');
-  assert.equal(lines[0], 'played_at,speaker,title,artist,album,video_id,url,senders,format,played_s');
+  assert.equal(lines[0], 'played_at,speaker,title,artist,album,video_id,url,senders,format,quality,played_s');
   assert.equal(lines.length, 3);
   assert.match(lines[1], /^2026-01-02T03:04:05\.000Z,Living Room,"'=HYPERLINK\(""x""\)","Ő, the ""band""",/);
-  assert.ok(lines[1].endsWith(`,${A},https://music.youtube.com/watch?v=${A},Anna,mp4,31`), lines[1]);
+  assert.ok(lines[1].endsWith(`,${A},https://music.youtube.com/watch?v=${A},Anna,mp4,AAC 258 kbps,31`), lines[1]);
   assert.equal(h.toCsv({ speaker: 'k' }).trim().split('\r\n').length, 2);
 });
 

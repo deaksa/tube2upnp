@@ -38,7 +38,7 @@ export class History {
   }
 
   /** Count one play. */
-  record({ videoId, info = {}, udn, speakerName, senders = [], format = null, playedS = 0, at = Date.now() }) {
+  record({ videoId, info = {}, udn, speakerName, senders = [], format = null, quality = null, playedS = 0, at = Date.now() }) {
     const d = this.#data;
     const t = d.tracks[videoId] ??= { plays: 0, bySpeaker: {} };
     // Keep the latest metadata: YouTube titles get corrected, thumbnails move.
@@ -50,7 +50,7 @@ export class History {
     t.bySpeaker[udn] = (t.bySpeaker[udn] ?? 0) + 1;
     t.lastPlayed = at;
     d.speakers[udn] = { name: speakerName ?? d.speakers[udn]?.name ?? udn, lastSeen: at };
-    d.recent.push({ at, videoId, speaker: udn, senders, format, playedS: Math.round(playedS) });
+    d.recent.push({ at, videoId, speaker: udn, senders, format, quality, playedS: Math.round(playedS) });
     if (d.recent.length > this.max) d.recent.splice(0, d.recent.length - this.max);
     this.#save();
   }
@@ -95,12 +95,12 @@ export class History {
 
   /** The detailed list as CSV, oldest first. */
   toCsv({ speaker = null } = {}) {
-    const rows = [['played_at', 'speaker', 'title', 'artist', 'album', 'video_id', 'url', 'senders', 'format', 'played_s']];
+    const rows = [['played_at', 'speaker', 'title', 'artist', 'album', 'video_id', 'url', 'senders', 'format', 'quality', 'played_s']];
     for (const raw of this.#data.recent) {
       if (speaker && raw.speaker !== speaker) continue;
       const e = this.#entry(raw);
       rows.push([new Date(e.at).toISOString(), e.speakerName, e.title, e.artist, e.album, e.videoId,
-        `https://music.youtube.com/watch?v=${e.videoId}`, e.senders.join('; '), e.format ?? '', e.playedS]);
+        `https://music.youtube.com/watch?v=${e.videoId}`, e.senders.join('; '), e.format ?? '', e.quality ?? '', e.playedS]);
     }
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
   }

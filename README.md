@@ -97,7 +97,7 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 Open `http://<host>:8080/` in a browser. It has five views:
 
-- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. For each speaker it also shows:
+- **Speakers** shows each renderer's display: cover, title, progress, the stream quality, and the prepared next track. The quality is the codec, bitrate and sample rate, and what Tube2U[PnP] turns it into (e.g. "AAC 258 kbps · 44.1 kHz · high quality", or "MP3 192 kbps, from AAC 130 kbps"). For MP4 and FLAC it's read from the file in the cache, so it's what the speaker really gets. **History** shows it for each play, and the CSV export has it in a `quality` column. For each speaker it also shows:
   - its own icon, and a **Device page** link that opens the speaker's web page (settings, inputs) in a new tab, when the speaker has one;
   - the volume it reports, with dB where the speaker gives it (as an AV receiver's display shows it);
   - **Playing another source** when it's busy with something that isn't Tube2U[PnP], such as Spotify, radio or another input, with the title when the speaker tells.
@@ -203,6 +203,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
   - Update yt-dlp first. This happens automatically by default.
   - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.
   - If the server's IP is flagged, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
+- **Premium quality:** cookies from a YouTube Premium account also unlock YouTube's 256 kbps AAC (format 141), which the default `YTDLP_FORMAT` picks by itself. The status page then shows "AAC 258 kbps · high quality". Tracks already in the cache keep the quality they were downloaded with, so use **Clear cache** after setting up cookies.
 - A track that yt-dlp can't get at all (it needs a sign-in, or it's removed or region-locked) is skipped, and the queue goes on with the next one, as in the YouTube apps. After 5 such tracks in a row, playback stops, and the log tells you to check yt-dlp. A speaker that refuses to play (for example in standby) is never skipped through.
 
 **Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, Tube2U[PnP] restarts the stream from the new position, so a seek takes a second or two longer.
