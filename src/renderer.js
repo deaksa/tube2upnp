@@ -799,6 +799,12 @@ export class Renderer extends Player {
     return dur - (c.lastRel ?? 0) <= slack;
   }
 
+  /** Does the renderer name our current stream? (Not just "not stale": an empty URI says nothing.) */
+  #playsOurs(uri) {
+    const ours = this.#current?.streamPath;
+    return Boolean(uri && ours && uri.includes(ours));
+  }
+
   /** Does the renderer report a stream other than the one we're playing? */
   #isStale(trackUri) {
     const ours = this.#current?.streamPath;
@@ -979,7 +985,8 @@ export class Renderer extends Player {
           // Where it really is. A jump back to the start mid-track is a renderer resetting its
           // clock (switching off, stopping), not playback: our own seeks set lastRel themselves.
           if (!(rel <= c.startAt + 1 && (c.lastRel ?? 0) > c.startAt + 5)) c.lastRel = rel;
-          if (state === 'PLAYING' && rel > c.startAt + 1) c.stoppedAt = null; // started again on the device
+          // Started again on the device - only if it's our stream (see the PLAYING branch below).
+          if (state === 'PLAYING' && rel > c.startAt + 1 && this.#playsOurs(uri)) c.stoppedAt = null;
         }
       }
     }
@@ -995,6 +1002,12 @@ export class Renderer extends Player {
     }
 
     if (state === 'PLAYING') {
+      if (this.#current?.stoppedAt != null) {
+        // Stopped on the device, and now it plays something else: a Yamaha switched on again
+        // resumes whatever it last played from another media server. Not ours: stay paused,
+        // count nothing, skip nothing. Play in the app loads our track again.
+        return;
+      }
       if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
       this.#countListen(); // before a gapless switch below hands over to the next track
