@@ -135,3 +135,18 @@ test('yxcBaseFrom: the YXC URL from a Yamaha description, only on the device its
   assert.equal(yxcBaseFrom(desc('', 'file:///etc/'), loc), null);
   assert.equal(yxcBaseFrom(et.parse('<root><device/></root>').getroot(), loc), null);
 });
+
+test('buildDidl: the cover with its DLNA profile', () => {
+  const x = buildDidl({ url: 'http://h/s', protocolInfo: 'http-get:*:audio/mp4:*', title: 'T',
+    albumArt: 'http://10.0.0.2:8000/art/abc.jpg', albumArtProfile: 'JPEG_SM' });
+  assert.match(x, /xmlns:dlna="urn:schemas-dlna-org:metadata-1-0\/"/);
+  assert.match(x, /<upnp:albumArtURI dlna:profileID="JPEG_SM">http:\/\/10\.0\.0\.2:8000\/art\/abc\.jpg<\/upnp:albumArtURI>/);
+  assert.match(buildDidl({ url: 'http://h/s', protocolInfo: 'x', title: 'T', albumArt: 'https://i.ytimg.com/a.jpg' }),
+    /<upnp:albumArtURI>https:\/\/i\.ytimg\.com\/a\.jpg<\/upnp:albumArtURI>/, 'no profile for the original');
+});
+
+test('buildDidl: the metadata parses as XML with the dlna namespace', () => {
+  const x = buildDidl({ url: 'http://h/s', protocolInfo: 'x', title: 'T', albumArt: 'http://a/b.jpg', albumArtProfile: 'JPEG_SM' });
+  assert.equal(didlTitle(x)?.title, 'T');
+});
+

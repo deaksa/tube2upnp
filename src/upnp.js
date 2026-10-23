@@ -160,17 +160,18 @@ function hms(sec) {
 }
 
 /** DIDL-Lite for SetAVTransportURI, with title/artist/cover so renderer displays show them. */
-export function buildDidl({ url, protocolInfo, title, artist, album, albumArt, duration, isVideo }) {
+export function buildDidl({ url, protocolInfo, title, artist, album, albumArt, albumArtProfile, duration, isVideo }) {
   const cls = isVideo ? 'object.item.videoItem' : 'object.item.audioItem.musicTrack';
   return [
     '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"',
     ' xmlns:dc="http://purl.org/dc/elements/1.1/"',
-    ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">',
+    ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"',
+    ' xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/">',
     '<item id="0" parentID="-1" restricted="1">',
     `<dc:title>${esc(title)}</dc:title>`,
     artist ? `<dc:creator>${esc(artist)}</dc:creator><upnp:artist>${esc(artist)}</upnp:artist>` : '',
     album ? `<upnp:album>${esc(album)}</upnp:album>` : '',
-    albumArt ? `<upnp:albumArtURI>${esc(albumArt)}</upnp:albumArtURI>` : '',
+    albumArt ? `<upnp:albumArtURI${albumArtProfile ? ` dlna:profileID="${esc(albumArtProfile)}"` : ''}>${esc(albumArt)}</upnp:albumArtURI>` : '',
     `<upnp:class>${cls}</upnp:class>`,
     `<res protocolInfo="${esc(protocolInfo)}"${duration ? ` duration="${hms(duration)}.000"` : ''}>${esc(url)}</res>`,
     '</item></DIDL-Lite>',
