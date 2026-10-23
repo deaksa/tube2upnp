@@ -727,3 +727,15 @@ test('the YouTube app gets the position again a few seconds into a track (the re
   assert.equal(sent.length, startedAt + 1, 'once per track');
   await r.destroy();
 });
+
+test('the renderer gets the cover from our media server when it can serve it', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  r.media.registerArt = (url) => (url === 'https://i/x.jpg' ? `/art/${'a'.repeat(32)}.jpg` : null);
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  const set = fake.calls.find((c) => c.action === 'SetAVTransportURI');
+  assert.match(set.body, /albumArtURI dlna:profileID=&quot;JPEG_SM&quot;&gt;http:\/\/[^&]+:8000\/art\/a{32}\.jpg/);
+  await r.destroy();
+});

@@ -216,7 +216,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
 - **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux, or FLAC), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
-- **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
+- **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays. The cover comes from Tube2U[PnP]'s media server as a 480×480 JPEG over plain HTTP (DLNA `JPEG_SM`), cropped to the square in the middle of the YouTube thumbnail. Many renderers can't load the thumbnail itself: it's HTTPS, often WebP, and 16:9. Without ffmpeg the renderer gets the original thumbnail.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances. The next track is prepared in advance, and played gaplessly where the renderer supports it.
 - **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, and moved devices are recreated. Speakers are remembered with a fixed port, checked directly so switched-off ones leave the cast menu within a minute or two, and can be removed or ignored on the status page. Receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.

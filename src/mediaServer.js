@@ -15,6 +15,12 @@ import { downloadWithYtdlp } from './resolver.js';
 import { stats } from './stats.js';
 
 const MAX_TOKENS = 256;
+const MAX_ART = 64;
+const ART_SIZE = 480; // square, within DLNA's JPEG_SM (640x480)
+const MAX_ART_SOURCE_BYTES = 5 * 1024 * 1024;
+// Covers are only fetched from YouTube's image hosts (the thumbnail URL yt-dlp reports).
+const ART_HOSTS = /(^|\.)(ytimg\.com|ggpht\.com|googleusercontent\.com)$/;
+const ART_FEATURES = 'DLNA.ORG_PN=JPEG_SM;DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=00f00000000000000000000000000000';
 const CACHE_FILE = /\.(m4a|flac|source)$/;
 const PASSTHROUGH_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
 
@@ -34,10 +40,13 @@ export class MediaServer {
   #remuxJobs = new Map();    // `${videoId}-${format}-${startAt}` -> Promise<file path>
   #downloadJobs = new Map(); // videoId -> Promise<source path>
   #pins = new Map();         // cache file name -> number of downloads/builds/responses using it
+  #art = new Map();          // token -> { source, jpeg: Promise<Buffer|null> }
+  #artTokens = new Map();    // source URL -> token
 
   /**
    * @param {object} [opts]
    * @param {(videoId, info, dest) => Promise<void>} [opts.download] - fetch source audio to a file
+   * @param {(url) => Promise<Buffer>} [opts.fetchImage] - fetch a cover's source image
    */
   constructor(config, resolver, logger, opts = {}) {
     this.cfg = config;
@@ -45,6 +54,7 @@ export class MediaServer {
     this.log = logger;
     this.download = opts.download
       ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
+    this.fetchImage = opts.fetchImage ?? fetchImage;
     // Default: under DATA_DIR, so the cache survives restarts (and the Docker data volume
     // keeps it). Never the shared temp folder: other local users could read or pre-create
     // files at a predictable path there.
@@ -97,12 +107,82 @@ export class MediaServer {
     return `/stream/${token}.${FORMATS[entry.format].ext ?? entry.ext}`;
   }
 
+  /**
+   * Register a track's cover and return its path (without host), or null if the URL isn't a
+   * YouTube image. Renderers often can't use the thumbnail itself: it's HTTPS, often WebP and
+   * up to 1280x720 (16:9, with bars around album art). We serve a 480x480 JPEG over plain HTTP
+   * instead, cropped to the square in the middle. It's built right away, in the background.
+   */
+  registerArt(source) {
+    let url;
+    try { url = new URL(source); } catch { return null; }
+    if (url.protocol !== 'https:' || !ART_HOSTS.test(url.hostname)) return null;
+    let token = this.#artTokens.get(url.href);
+    if (!token) {
+      token = randomBytes(16).toString('hex');
+      const jpeg = this.#makeArt(url.href).catch((err) => {
+        this.log.debug(`Cover ${url.href} not converted (${err.message}) - the renderer gets the original`);
+        return null;
+      });
+      this.#art.set(token, { source: url.href, jpeg });
+      this.#artTokens.set(url.href, token);
+      while (this.#art.size > MAX_ART) {
+        const [oldest, old] = this.#art.entries().next().value;
+        this.#art.delete(oldest);
+        this.#artTokens.delete(old.source);
+      }
+    }
+    return `/art/${token}.jpg`;
+  }
+
+  async #makeArt(source) {
+    const input = await this.fetchImage(source);
+    const args = ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+      '-vf', `crop=w='min(iw,ih)':h='min(iw,ih)',scale=${ART_SIZE}:${ART_SIZE}`,
+      '-frames:v', '1', '-pix_fmt', 'yuvj420p', '-q:v', '3', '-f', 'mjpeg', 'pipe:1'];
+    return new Promise((resolve, reject) => {
+      const ff = spawn(this.cfg.ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      const out = [];
+      let err = '';
+      const timer = setTimeout(() => ff.kill('SIGKILL'), 15000);
+      ff.stdout.on('data', (d) => out.push(d));
+      ff.stderr.on('data', (d) => { err += d; });
+      ff.on('error', (e) => { clearTimeout(timer); reject(e); });
+      ff.on('close', (code) => {
+        clearTimeout(timer);
+        const jpeg = Buffer.concat(out);
+        if (code === 0 && jpeg.length) resolve(jpeg);
+        else reject(new Error(`ffmpeg exited with ${code}: ${err.trim().split('\n').pop() ?? ''}`));
+      });
+      ff.stdin.on('error', () => {}); // ffmpeg may exit before reading everything
+      ff.stdin.end(input);
+    });
+  }
+
+  async #serveArt(req, res, art) {
+    const jpeg = await art.jpeg;
+    if (!jpeg) {
+      // Couldn't convert it (no ffmpeg, odd image): the renderer can still try the original.
+      res.writeHead(302, { Location: art.source }).end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg', 'Content-Length': jpeg.length,
+      'transferMode.dlna.org': 'Interactive', 'contentFeatures.dlna.org': ART_FEATURES,
+      'Cache-Control': 'max-age=86400',
+    });
+    res.end(req.method === 'HEAD' ? undefined : jpeg);
+  }
+
   /** Do any slow preparation (building mp4/flac files) before the renderer is told to play. */
   async prepare(entry) {
     if (FILE_FORMATS.includes(entry.format)) await this.#remuxToFile(entry);
   }
 
   async #handle(req, res) {
+    const a = /^\/art\/([0-9a-f]{32})\.jpg$/.exec(req.url ?? '');
+    const art = a && this.#art.get(a[1]);
+    if (art && ['GET', 'HEAD'].includes(req.method)) return this.#serveArt(req, res, art);
     const m = /^\/stream\/([0-9a-f]{32})\.\w+$/.exec(req.url ?? '');
     const entry = m && this.#tokens.get(m[1]);
     if (!entry || !['GET', 'HEAD'].includes(req.method)) {
@@ -539,4 +619,14 @@ export class MediaServer {
       res.on('close', () => { s.destroy(); resolve(); });
     });
   }
+}
+
+/** A cover's source image: not followed elsewhere by redirects, and not too big. */
+async function fetchImage(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000), redirect: 'error' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (Number(res.headers.get('content-length')) > MAX_ART_SOURCE_BYTES) throw new Error('image too big');
+  const data = Buffer.from(await res.arrayBuffer());
+  if (data.length > MAX_ART_SOURCE_BYTES) throw new Error('image too big');
+  return data;
 }
