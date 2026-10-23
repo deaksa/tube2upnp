@@ -15,6 +15,7 @@ import { YamahaExtendedControl } from './yamaha.js';
 // after this long, doubling per failure - not on every poll.
 const PREFETCH_RETRY_MS = 30 * 1000;
 const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
+const MAX_UNPLAYABLE_IN_A_ROW = 5;
 
 export class Renderer extends Player {
   #call;
@@ -47,6 +48,8 @@ export class Renderer extends Player {
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
   #prefetching = false;
+  #trackFailed = false;    // the last #load failed on the track itself (yt-dlp, download), not the device
+  #unplayable = 0;         // tracks skipped in a row because they couldn't be played
   #prefetchFailures = new Map(); // videoId -> { count, until }
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
@@ -259,7 +262,33 @@ export class Renderer extends Player {
       this.log.info(`Now playing "${adv.item.info.title}" (continued gaplessly)`);
       return true;
     }
-    return this.#load(video, position);
+    const ok = await this.#load(video, position);
+    if (!ok && this.#trackFailed) this.#skipUnplayable(video);
+    return ok;
+  }
+
+  /**
+   * A track YouTube won't give us (needs sign-in, removed, region-locked) shouldn't stop the
+   * playlist: move on to the next one, like the YouTube apps do. Only for failures of the
+   * track itself - a device that refuses Play (switched off) would fail the next one too -
+   * and only a few in a row, so a dead yt-dlp can't run through the whole queue.
+   */
+  #skipUnplayable(video) {
+    const seq = this.#loadSeq;
+    const timer = setTimeout(async () => {
+      // Player.play() has reported STOPPED by now. A new cast or skip since then wins.
+      if (this.#destroyed || seq !== this.#loadSeq || this.status !== PLAYER_STATUSES.STOPPED
+          || this.queue.current?.id !== video.id) return;
+      if (++this.#unplayable > MAX_UNPLAYABLE_IN_A_ROW) {
+        this.log.error(`${MAX_UNPLAYABLE_IN_A_ROW} tracks in a row could not be played - stopping`
+          + ' (check yt-dlp in the log; YouTube may want cookies, see YTDLP_EXTRA_ARGS)');
+        this.#unplayable = 0;
+        return;
+      }
+      this.log.warn(`Skipping ${video.id}: it can't be played - on to the next track`);
+      await this.next().catch((err) => this.log.error('Skipping to the next track failed:', err.message));
+    }, this.cfg.skipUnplayableDelayMs ?? 1000);
+    timer.unref?.();
   }
 
   /**
@@ -271,12 +300,16 @@ export class Renderer extends Player {
   async #load(video, position, format = null, { offsetStart = false } = {}) {
     const seq = ++this.#loadSeq;
     this.#stopPolling();
+    this.#trackFailed = false;
     try {
       // Already prepared in the background while the previous track played?
       const prepared = !format && !offsetStart && position < 2 && this.#queued?.video.id === video.id
         ? this.#queued.item : null;
       this.#queued = null; // the renderer's "next" slot is re-sent after this load
-      const item = prepared ?? await this.#prepareItem(video, position, format, offsetStart);
+      const item = prepared ?? await this.#prepareItem(video, position, format, offsetStart).catch((err) => {
+        this.#trackFailed = true;
+        throw err;
+      });
       if (seq !== this.#loadSeq) return false; // superseded by a newer play()
       if (prepared) this.log.info(`Using prepared track "${item.info.title}"`);
 
@@ -344,6 +377,7 @@ export class Renderer extends Player {
     // A reload of the same video (seek restart, format change) keeps its skip state.
     if (this.#current?.video.id !== item.current.video.id) this.#resetSkips();
     item.current.loadedAt = Date.now();
+    this.#unplayable = 0;
     // The YouTube app takes the position from the state we send when the track starts and
     // counts on by itself. Right after a switch some renderers (Yamaha) still report the
     // previous track's clock, so the app would run ahead by a whole track: send it again.

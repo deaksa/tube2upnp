@@ -739,3 +739,66 @@ test('the renderer gets the cover from our media server when it can serve it', a
   assert.match(set.body, /albumArtURI dlna:profileID=&quot;JPEG_SM&quot;&gt;http:\/\/[^&]+:8000\/art\/a{32}\.jpg/);
   await r.destroy();
 });
+
+const ytVideo = (id) => ({ id, client: { key: 'YT' } });
+/** The stub resolver refuses these ids (or '*': all), like yt-dlp when YouTube wants a sign-in. */
+function refuse(r, ids) {
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => {
+    if (ids === '*' || ids.includes(id)) throw new Error(`yt-dlp failed for ${id}: Please sign in`);
+    return resolve(id);
+  };
+}
+
+async function skipSetup(t, fakeOpts, delay) {
+  const fake = await startFakeRenderer(fakeOpts);
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { skipUnplayableDelayMs: delay });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  t.after(() => r.destroy());
+  return { r, fake };
+}
+
+test('unplayable: a track YouTube refuses is skipped to the next one', async (t) => {
+  const { r } = await skipSetup(t, {}, 50);
+  refuse(r, [A]);
+  let nexts = 0;
+  r.next = async () => { nexts++; return r.play(ytVideo(B), 0); };
+  assert.equal(await r.play(ytVideo(A), 0), false);
+  await until(() => r.nowPlaying?.videoId === B, 2000);
+  assert.equal(nexts, 1);
+  assert.equal(r.nowPlaying.videoId, B);
+});
+
+test('unplayable: a device that refuses Play (standby) is not skipped through', async (t) => {
+  const { r } = await skipSetup(t, { bareFaultOn: ['Play'] }, 50);
+  let nexts = 0;
+  r.next = async () => { nexts++; return false; };
+  assert.equal(await r.play(ytVideo(A), 0), false);
+  await wait(200);
+  assert.equal(nexts, 0);
+});
+
+test('unplayable: gives up after 5 in a row', async (t) => {
+  const { r } = await skipSetup(t, {}, 20);
+  refuse(r, '*');
+  let n = 0;
+  let nexts = 0;
+  r.next = async () => { nexts++; return r.play(ytVideo(`V${String(++n).padStart(10, '0')}`), 0); };
+  await r.play(ytVideo(A), 0);
+  await wait(600);
+  assert.equal(nexts, 5, 'stopped after 5 unplayable tracks in a row');
+});
+
+test('unplayable: a new cast during the pause before skipping wins', async (t) => {
+  const { r } = await skipSetup(t, {}, 200);
+  refuse(r, [A]);
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play(ytVideo(A), 0);
+  await r.play(ytVideo(B), 0); // the user picks something else
+  await wait(350);
+  assert.equal(nexts, 0);
+  assert.equal(r.nowPlaying.videoId, B);
+});
