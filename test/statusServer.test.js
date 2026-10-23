@@ -21,6 +21,22 @@ function fakeRenderer() {
   };
 }
 
+/** Stands in for DeviceManager: one running speaker (r1) and one offline (r2). */
+function fakeDevices(r) {
+  return {
+    renderers: new Map([['r1', r]]),
+    list: () => [{ ...r.statusInfo(), state: 'online' }, { id: 'r2', name: 'R2', state: 'offline' }],
+    remove: async (id) => {
+      if (id === 'r1') throw Object.assign(new Error('online'), { status: 409 });
+      r.calls.push(['remove', id]);
+    },
+    ignore: async (id) => { r.calls.push(['ignore', id]); },
+    unignore: async (id) => { r.calls.push(['unignore', id]); },
+    icon: (id) => (id === 'r1' ? { type: 'image/png', data: Buffer.from('89504e47', 'hex') } : null),
+    art: (id) => (id === 'r1' ? { type: 'image/jpeg', data: Buffer.from('ffd8ffe0', 'hex') } : null),
+  };
+}
+
 async function start(t, cfg = {}) {
   const r = fakeRenderer();
   const conf = { statusPort: 0, outputFormat: 'mp4', dataDir: mkdtempSync(path.join(tmpdir(), 'st-')),
@@ -28,7 +44,8 @@ async function start(t, cfg = {}) {
   const settings = await new Settings(conf, new Logger('none')).load();
   const history = cfg.history === false ? null : await new History(conf, new Logger('none')).load();
   const server = startStatusServer(conf,
-    { renderers: new Map([['r1', r]]), settings, history, mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
+    { devices: fakeDevices(r), settings, history, rediscover: () => r.calls.push(['rediscover']),
+      mediaServer: { cacheInfo: async () => ({ files: 0, bytes: 0, limitBytes: 1 }) } },
     new Logger('none'));
   await new Promise((res) => server.once('listening', res));
   t.after(() => server.close());
@@ -179,4 +196,37 @@ test('host check edge cases', () => {
   assert.equal(hostOk('nas.evil.example', allowed), false);
   assert.equal(hostOk('10.0.0.5.evil.example', allowed), false);
   assert.equal(hostOk('bad host', allowed), false);
+});
+
+test('speakers: offline ones are listed; remove, ignore and allow again (CSRF-protected)', async (t) => {
+  const { base, r } = await start(t);
+  const s = await (await fetch(base + '/api/status')).json();
+  assert.deepEqual(s.renderers.map((x) => [x.id, x.state]), [['r1', 'online'], ['r2', 'offline']]);
+
+  assert.equal((await post(base + '/api/renderers/r2/remove', {})).status, 403, 'needs the CSRF header');
+  const csrf = { 'X-Tube2upnp': '1' };
+  assert.equal((await post(base + '/api/renderers/r2/remove', {}, csrf)).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/remove', {}, csrf)).status, 409, 'online: use ignore');
+  assert.equal((await post(base + '/api/renderers/r1/ignore', {}, csrf)).status, 200);
+  assert.equal((await post(base + '/api/renderers/r1/unignore', {}, csrf)).status, 200);
+  assert.equal((await post(base + '/api/renderers/%E0%A4%A/remove', {}, csrf)).status, 400, 'malformed id');
+  assert.deepEqual(r.calls, [['remove', 'r2'], ['ignore', 'r1'], ['unignore', 'r1'], ['rediscover']]);
+});
+
+test('speaker icons are served by us, as images only, behind the token', async (t) => {
+  const { base } = await start(t, { statusToken: 's3cret' });
+  const res = await fetch(base + '/api/renderers/r1/icon?token=s3cret');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'image/png');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(res.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), Buffer.from('89504e47', 'hex'));
+  assert.equal((await fetch(base + '/api/renderers/r2/icon?token=s3cret')).status, 404);
+  assert.equal((await fetch(base + '/api/renderers/r1/icon')).status, 401);
+
+  const art = await fetch(base + '/api/renderers/r1/art?v=3&token=s3cret');
+  assert.equal(art.headers.get('content-type'), 'image/jpeg');
+  assert.match(art.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.equal((await fetch(base + '/api/renderers/r2/art?token=s3cret')).status, 404);
+  assert.equal((await fetch(base + '/api/renderers/r1/art')).status, 401);
 });

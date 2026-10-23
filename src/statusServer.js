@@ -72,7 +72,7 @@ function csrfOk(req) {
   return !origin || origin === `http://${req.headers.host}`;
 }
 
-export function startStatusServer(config, { renderers, mediaServer, settings, history = null }, log) {
+export function startStatusServer(config, { devices, mediaServer, settings, history = null, rediscover = () => {} }, log) {
   const me = os.hostname().toLowerCase();
   const allowedHosts = new Set([me, `${me}.local`, ...(config.statusHosts ?? []).map((h) => h.toLowerCase())]);
   const warnedHosts = new Set();
@@ -80,7 +80,7 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
     ['GET', /^\/api\/status$/, async () => ({
       app: { version: stats.info.version, uptimeS: Math.round((Date.now() - stats.started) / 1000),
         outputFormat: config.outputFormat, prefetch: config.prefetch, gapless: config.gapless },
-      renderers: [...renderers.values()].map((r) => r.statusInfo()),
+      renderers: devices.list(),
     })],
     ['GET', /^\/api\/stats$/, async () => ({ ...stats.snapshot(), cache: await mediaServer.cacheInfo() })],
     ['GET', /^\/api\/logs$/, async (_m, url) => ({ lines: recentLogs(Number(url.searchParams.get('after')) || 0) })],
@@ -129,6 +129,19 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
       return { ok: true };
     }],
     ['POST', /^\/api\/renderers\/([^/]+)\/pair$/, async (m) => ({ code: await renderer(m[1]).getPairingCode() })],
+    ['POST', /^\/api\/renderers\/([^/]+)\/remove$/, async (m) => {
+      await devices.remove(speakerId(m[1]));
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/ignore$/, async (m) => {
+      await devices.ignore(speakerId(m[1]));
+      return { ok: true };
+    }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/unignore$/, async (m) => {
+      await devices.unignore(speakerId(m[1]));
+      rediscover(); // set it up again right away if it's there
+      return { ok: true };
+    }],
   ];
 
   function playHistory() {
@@ -138,8 +151,16 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
 
   const limit = (url) => Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 100));
 
+  function speakerId(id) {
+    try {
+      return decodeURIComponent(id);
+    } catch {
+      throw Object.assign(new Error('Bad speaker id'), { status: 400 });
+    }
+  }
+
   function renderer(id) {
-    const r = renderers.get(decodeURIComponent(id));
+    const r = devices.renderers.get(speakerId(id));
     if (!r) throw Object.assign(new Error('Unknown renderer - it may have gone offline'), { status: 404 });
     return r;
   }
@@ -172,6 +193,19 @@ export function startStatusServer(config, { renderers, mediaServer, settings, hi
       if (!tokenOk(config, req, url)) return json(res, 401, { error: 'Missing or wrong token. Open the page as /?token=…' });
 
       if (req.method === 'GET' && url.pathname === '/api/logs/stream') return streamLogs(req, res, url);
+      const imagePath = req.method === 'GET' && /^\/api\/renderers\/([^/]+)\/(icon|art)$/.exec(url.pathname);
+      if (imagePath) {
+        // The device's own icon, or the cover of what it plays, fetched by us: the page's CSP
+        // doesn't allow LAN http images. A new cover gets a new ?v=, so caching is fine.
+        const id = speakerId(imagePath[1]);
+        const img = imagePath[2] === 'icon' ? devices.icon(id) : devices.art?.(id);
+        if (!img) return json(res, 404, { error: imagePath[2] === 'icon' ? 'No icon' : 'No cover' });
+        res.writeHead(200, {
+          ...SECURITY_HEADERS, 'Content-Type': img.type, 'Content-Length': img.data.length,
+          'Cache-Control': 'private, max-age=3600', 'Content-Security-Policy': "default-src 'none'",
+        }).end(img.data);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/history.csv') {
         // BOM: Excel otherwise reads the UTF-8 as ANSI and mangles accented titles.
         const csv = '﻿' + playHistory().toCsv({ speaker: url.searchParams.get('speaker') });

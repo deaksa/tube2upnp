@@ -522,3 +522,359 @@ test('history: gapless continuation counts both tracks', async (t) => {
   assert.deepEqual(records.map((e) => e.videoId), [A, B]);
   await r.destroy();
 });
+
+test('volume for the status page: read at start, scaled to the device range, refreshed while playing', async (t) => {
+  const fake = await startFakeRenderer({ volumeRange: [0, 80] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().volume, { level: 38, raw: 30, min: 0, max: 80, muted: false, rangeKnown: true, db: null });
+
+  await r.doPlay({ id: A }, 0);
+  Object.assign(fake.state, { volume: 60, muted: true }); // turned up on the device, then muted
+  await until(() => r.statusInfo().volume.raw === 60);
+  assert.deepEqual(r.statusInfo().volume, { level: 75, raw: 60, min: 0, max: 80, muted: true, rangeKnown: true, db: null });
+
+  assert.equal(await r.doSetVolume({ level: 20, muted: false }), true);
+  assert.equal(r.statusInfo().volume.raw, 20, 'a change from the app shows at once');
+  assert.deepEqual(await r.doGetVolume(), { level: 20, muted: false }, 'the app still gets the raw value, as before');
+  await r.destroy();
+});
+
+test('volume: a device without a range in its SCPD is assumed to be 0-100', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().volume, { level: 30, raw: 30, min: 0, max: 100, muted: false, rangeKnown: false, db: null });
+  await r.destroy();
+});
+
+test('speaker details: device page, icon, volume in dB, transport actions', async (t) => {
+  const fake = await startFakeRenderer({ page: true, volumeDb: -9088, transportActions: 'Play,Stop,Seek' });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  const info = r.statusInfo();
+  assert.equal(info.presentationURL, new URL('/web/index.html', fake.location).toString(), 'from the root device');
+  assert.equal(info.icon, true);
+  assert.equal(r.icon.type, 'image/png', 'the 48 px PNG, not the 120 px JPEG');
+  assert.equal(info.volume.db, -35.5, '-9088 / 256');
+  assert.ok(info.actions.supported.includes('Seek') && info.actions.supported.includes('SetNextAVTransportURI'));
+  assert.deepEqual(info.actions.allowed, ['Play', 'Stop', 'Seek']);
+  await r.destroy();
+});
+
+test('volume in dB: plain dB when the device range says so; not asked when not listed', async (t) => {
+  const fake = await startFakeRenderer({ volumeDb: -35, volumeDbRange: [-80, 16] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.equal(r.statusInfo().volume.db, -35);
+  await r.destroy();
+
+  const plain = await startFakeRenderer();
+  t.after(() => plain.server.close());
+  const other = setup(plain);
+  await other.r.init();
+  assert.equal(other.r.statusInfo().volume.db, null);
+  assert.ok(!plain.calls.some((c) => c.action === 'GetVolumeDB'), 'no call the device does not list');
+  assert.equal(other.r.statusInfo().presentationURL, null);
+  assert.equal(other.r.statusInfo().icon, false);
+  await other.r.destroy();
+});
+
+test('playing another source is reported while we are idle, with its title', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  Object.assign(fake.state, {
+    transport: 'PLAYING', currentUri: 'x-sonos-spotify:spotify%3atrack%3a1',
+    metaData: '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+      + '<item><dc:title>Bohemian Rhapsody</dc:title><dc:creator>Queen</dc:creator></item></DIDL-Lite>',
+  });
+  const { r } = setup(fake);
+  await r.init();
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'Bohemian Rhapsody', artist: 'Queen', source: 'spotify' });
+
+  Object.assign(fake.state, { transport: 'PAUSED_PLAYBACK', currentUri: 'http://radio.example:8000/live', metaData: '' });
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: null, artist: null, source: 'radio.example' });
+
+  await r.doPlay({ id: A }, 0); // now we play: not "another source"
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null);
+  await r.doStop();
+  Object.assign(fake.state, { transport: 'PAUSED_PLAYBACK', currentUri: 'http://10.0.0.5:8000/stream/' + 'a'.repeat(32) + '.m4a' });
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null, 'one of our own streams left loaded');
+  await r.destroy();
+});
+
+test('Yamaha Extended Control: input, what plays on it, standby, master volume in dB', async (t) => {
+  const fake = await startFakeRenderer({ yamaha: {} });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  let info = r.statusInfo();
+  assert.equal(info.external, null, 'the server input is ours to watch over UPnP');
+  assert.equal(info.power, 'on');
+  assert.equal(info.model, 'Speaker 1', 'the model number is not repeated when the name has it (RX-V4A V4A)');
+  assert.deepEqual(info.volume, { level: 7, raw: 12, min: 0, max: 161, muted: false, rangeKnown: true, db: -74.5 },
+    'the master volume as the display shows it, not RenderingControl (30)');
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'tuner', input_text: 'TUNER' };
+  fake.state.yxc.tuner = { band: 'fm', fm: { freq: 103900 }, rds: { program_service: 'PETOFI', radio_text_a: '' } };
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PLAYING', title: 'PETOFI', artist: 'FM 103.90 MHz', source: 'TUNER', art: null },
+    'UPnP says STOPPED, YXC knows the radio plays');
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'net_radio', input_text: 'NET RADIO' };
+  // As the RX-V4A reports it.
+  fake.state.yxc.netusb = { input: 'net_radio', playback: 'play', artist: 'FM 103.9 A ROCK (Budapest/Hungarian)', album: '',
+    track: "Queen - Don't Stop Me Now", albumart_url: '/YamahaRemoteControl/AlbumART/AlbumART2229.png' };
+  await r.refreshStatus();
+  const ext = r.statusInfo().external;
+  assert.deepEqual({ ...ext, art: undefined }, { state: 'PLAYING', title: "Queen - Don't Stop Me Now", artist: null,
+    source: 'FM 103.9 A ROCK (Budapest/Hungarian)', art: undefined }, 'the station is the source');
+  assert.match(ext.art, /^[0-9a-f]{16}$/, 'a cover to show, versioned by its content');
+  assert.equal(r.art.type, 'image/png');
+  assert.match(r.art.data.toString(), /AlbumART2229/);
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, ext.art, 'same cover: not fetched again');
+  assert.equal(fake.calls.filter((c) => c.action === 'albumart').length, 1);
+
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, track: 'Next song', albumart_url: '/YamahaRemoteControl/AlbumART/AlbumART2230.png' };
+  await r.refreshStatus();
+  assert.notEqual(r.statusInfo().external.art, ext.art, 'a new cover gets a new version');
+  assert.match(r.art.data.toString(), /AlbumART2230/);
+
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, albumart_url: 'http://evil.example/x.png' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, null, 'never fetched from another host');
+  fake.state.yxc.netusb = { ...fake.state.yxc.netusb, albumart_url: '/YamahaRemoteControl/moved' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external.art, null, 'redirects are not followed (they could lead anywhere)');
+  assert.ok(!fake.calls.some((c) => c.url === '/YamahaRemoteControl/AlbumART/moved.png'));
+
+  fake.state.yxc.netusb = { input: 'net_radio', playback: 'pause', track: '', artist: 'Jazz FM', album: '' };
+  await r.refreshStatus();
+  assert.deepEqual(r.statusInfo().external, { state: 'PAUSED_PLAYBACK', title: 'Jazz FM', artist: null, source: 'NET RADIO', art: null },
+    'a station without song titles');
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, input: 'hdmi1', input_text: 'TV', volume: 80, mute: true };
+  await r.refreshStatus();
+  info = r.statusInfo();
+  assert.deepEqual(info.external, { state: 'PLAYING', title: null, artist: null, source: 'TV', art: null });
+  assert.equal(info.volume.level, 50);
+  assert.equal(info.volume.muted, true);
+
+  fake.state.yxc.main = { ...fake.state.yxc.main, power: 'standby' };
+  await r.refreshStatus();
+  assert.equal(r.statusInfo().external, null, 'nothing plays in standby');
+  assert.equal(r.statusInfo().power, 'standby');
+  await r.destroy();
+});
+
+test('Yamaha Extended Control: found on a Yamaha that does not announce it; UPnP numbers when it fails', async (t) => {
+  const fake = await startFakeRenderer({ yamaha: { announce: false, main: { input: 'tuner', input_text: 'TUNER' } } });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  assert.equal(r.statusInfo().external?.source, 'TUNER');
+
+  fake.state.yxc.broken = true;
+  await r.refreshStatus();
+  const info = r.statusInfo();
+  assert.equal(info.external, null, 'back to UPnP, which sees nothing playing');
+  assert.equal(info.power, null);
+  assert.equal(info.volume.raw, 30);
+  await r.destroy();
+
+  const plain = await startFakeRenderer();
+  t.after(() => plain.server.close());
+  const other = setup(plain);
+  await other.r.init();
+  assert.ok(!plain.calls.some((c) => c.service === 'YXC'), 'not asked of other makes');
+  await other.r.destroy();
+});
+
+test('the YouTube app gets the position again a few seconds into a track (the renderer may still have the old clock)', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { prefetch: true, gapless: true, positionResyncMs: 300 });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  const yt = (id) => ({ id, client: { key: 'YT' } });
+  const sent = []; // what yt-cast-receiver would send to the app
+  r.on('state', ({ current }) => sent.push([current.queue?.current?.id ?? null, current.status, current.position]));
+  r.getUpcomingVideo = () => ({ id: B });
+  await r.play(yt(A), 0);
+  await until(() => fake.state.nextUri);
+
+  // Like the RX-V4A: right after playing on into B it still reports A's clock (1:08).
+  r.next = async () => r.play(yt(B), 0);
+  r.getUpcomingVideo = () => null;
+  fake.state.relTime = '0:01:08';
+  fake.advance();
+  await until(() => sent.at(-1)?.[0] === B && sent.at(-1)?.[1] === 1); // play() done: B is PLAYING
+  const startedAt = sent.length;
+  assert.equal(sent.at(-1)[2], 68, 'the wrong position the app got at the switch');
+
+  fake.state.relTime = '0:00:04';
+  await until(() => sent.length > startedAt);
+  assert.deepEqual(sent.at(-1), [B, 1, 4], 'corrected: same status, the real position');
+  await wait(400);
+  assert.equal(sent.length, startedAt + 1, 'once per track');
+  await r.destroy();
+});
+
+test('switched off mid-track: not skipped; shown paused there, and Play loads it again from there', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  fake.state.relTime = '0:01:20';
+  await wait(200);
+
+  fake.state.transport = 'STOPPED'; // the Yamaha going to standby
+  fake.state.relTime = '0:00:00';
+  await until(() => r.status === 2); // PAUSED
+  await wait(200);
+  assert.equal(nexts, 0, 'not skipped to the next track');
+  assert.equal(r.status, 2);
+  assert.equal(await r.getPosition(), 80, 'the app shows where it stopped');
+
+  const loads = fake.calls.filter((c) => c.action === 'SetAVTransportURI').length;
+  assert.equal(await r.resume(), true);
+  assert.equal(r.status, 1);
+  assert.equal(fake.calls.filter((c) => c.action === 'SetAVTransportURI').length, loads + 1, 'loaded again');
+  assert.match(fake.calls.filter((c) => c.action === 'Seek').at(-1).body, /<Target>0?0:01:20<\/Target>/);
+  await r.destroy();
+});
+
+test('a track that stops at its end, or on a renderer that reports no position, advances the queue', async (t) => {
+  for (const [relTime, why] of [['0:03:26', 'near the end (3:26 of 3:30)'], ['0:00:00', 'position never moved']]) {
+    const fake = await startFakeRenderer();
+    t.after(() => fake.server.close());
+    const { r } = setup(fake);
+    await r.init();
+    r.setLogger(new Logger('none'));
+    let nexts = 0;
+    r.next = async () => { nexts++; return true; };
+    await r.play({ id: A, client: { key: 'YT' } }, 0);
+    fake.state.relTime = relTime;
+    await wait(200);
+    fake.state.transport = 'STOPPED';
+    await until(() => nexts > 0, 1000);
+    assert.equal(nexts, 1, why);
+    await r.destroy();
+  }
+});
+
+test('switched on again playing something else: stays paused, nothing counted or skipped', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  fake.state.relTime = '0:01:20';
+  await wait(200);
+  fake.state.transport = 'STOPPED';
+  await until(() => r.status === 2);
+
+  // The Yamaha comes back on and resumes a track from another media server.
+  Object.assign(fake.state, { transport: 'PLAYING', currentUri: 'http://192.168.0.5:9000/music/other.flac', relTime: '0:02:30' });
+  await wait(300);
+  assert.equal(r.status, 2, 'still paused in the app');
+  assert.equal(await r.getPosition(), 80, 'still where ours stopped');
+  fake.state.transport = 'STOPPED'; // the other track ends
+  await wait(300);
+  assert.equal(nexts, 0, 'its end is not ours to advance on');
+
+  assert.equal(await r.resume(), true, 'Play in the app loads ours again');
+  assert.match(fake.state.currentUri, /\/stream\//);
+  assert.equal(r.status, 1);
+  await r.destroy();
+});
+
+test('the renderer gets the cover from our media server when it can serve it', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  r.media.registerArt = (url) => (url === 'https://i/x.jpg' ? `/art/${'a'.repeat(32)}.jpg` : null);
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  const set = fake.calls.find((c) => c.action === 'SetAVTransportURI');
+  assert.match(set.body, /albumArtURI dlna:profileID=&quot;JPEG_SM&quot;&gt;http:\/\/[^&]+:8000\/art\/a{32}\.jpg/);
+  await r.destroy();
+});
+
+const ytVideo = (id) => ({ id, client: { key: 'YT' } });
+/** The stub resolver refuses these ids (or '*': all), like yt-dlp when YouTube wants a sign-in. */
+function refuse(r, ids) {
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => {
+    if (ids === '*' || ids.includes(id)) throw new Error(`yt-dlp failed for ${id}: Please sign in`);
+    return resolve(id);
+  };
+}
+
+async function skipSetup(t, fakeOpts, delay) {
+  const fake = await startFakeRenderer(fakeOpts);
+  t.after(() => fake.server.close());
+  const { r } = setup(fake, { skipUnplayableDelayMs: delay });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  t.after(() => r.destroy());
+  return { r, fake };
+}
+
+test('unplayable: a track YouTube refuses is skipped to the next one', async (t) => {
+  const { r } = await skipSetup(t, {}, 50);
+  refuse(r, [A]);
+  let nexts = 0;
+  r.next = async () => { nexts++; return r.play(ytVideo(B), 0); };
+  assert.equal(await r.play(ytVideo(A), 0), false);
+  await until(() => r.nowPlaying?.videoId === B, 2000);
+  assert.equal(nexts, 1);
+  assert.equal(r.nowPlaying.videoId, B);
+});
+
+test('unplayable: a device that refuses Play (standby) is not skipped through', async (t) => {
+  const { r } = await skipSetup(t, { bareFaultOn: ['Play'] }, 50);
+  let nexts = 0;
+  r.next = async () => { nexts++; return false; };
+  assert.equal(await r.play(ytVideo(A), 0), false);
+  await wait(200);
+  assert.equal(nexts, 0);
+});
+
+test('unplayable: gives up after 5 in a row', async (t) => {
+  const { r } = await skipSetup(t, {}, 20);
+  refuse(r, '*');
+  let n = 0;
+  let nexts = 0;
+  r.next = async () => { nexts++; return r.play(ytVideo(`V${String(++n).padStart(10, '0')}`), 0); };
+  await r.play(ytVideo(A), 0);
+  await wait(600);
+  assert.equal(nexts, 5, 'stopped after 5 unplayable tracks in a row');
+});
+
+test('unplayable: a new cast during the pause before skipping wins', async (t) => {
+  const { r } = await skipSetup(t, {}, 200);
+  refuse(r, [A]);
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play(ytVideo(A), 0);
+  await r.play(ytVideo(B), 0); // the user picks something else
+  await wait(350);
+  assert.equal(nexts, 0);
+  assert.equal(r.nowPlaying.videoId, B);
+});

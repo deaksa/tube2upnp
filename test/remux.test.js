@@ -310,3 +310,46 @@ test('range parsing', () => {
   assert.equal(parseRange('bytes=20-', 10), 'invalid');
   assert.equal(parseRange('items=1-2', 10), null);
 });
+
+test('covers: a YouTube thumbnail is served as a square 480x480 JPEG over HTTP', { skip: !hasFfmpeg }, async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'art-'));
+  const webp = path.join(dir, 'thumb.webp');
+  // 16:9 like maxresdefault, WebP like many YouTube thumbnails.
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=1280x720', '-frames:v', '1', webp]);
+  const fetched = [];
+  const ms = new MediaServer({ mediaPort: 0, ffmpegPath: 'ffmpeg', cacheDir: path.join(dir, 'cache') }, {}, new Logger('none'), {
+    fetchImage: async (url) => {
+      fetched.push(url);
+      if (url.includes('broken')) throw new Error('HTTP 404');
+      return readFileSync(webp);
+    },
+  });
+  await ms.start();
+  t.after(() => ms.stop());
+  const base = `http://127.0.0.1:${ms.port}`;
+
+  const thumb = 'https://i.ytimg.com/vi_webp/AAAAAAAAAAA/maxresdefault.webp';
+  const p = ms.registerArt(thumb);
+  assert.match(p, /^\/art\/[0-9a-f]{32}\.jpg$/);
+  assert.equal(ms.registerArt(thumb), p, 'same cover, same path');
+  const res = await fetch(base + p);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'image/jpeg');
+  assert.match(res.headers.get('contentfeatures.dlna.org'), /DLNA\.ORG_PN=JPEG_SM/);
+  // ffprobe reads the image from stdin: nothing from the network goes to disk.
+  const jpeg = Buffer.from(await res.arrayBuffer());
+  const info = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', '-i', 'pipe:0'],
+    { input: jpeg }).toString().trim();
+  assert.equal(info, 'mjpeg,480,480');
+  assert.deepEqual(fetched, [thumb], 'fetched and converted once');
+
+  assert.equal(ms.registerArt('http://i.ytimg.com/vi/x/hq.jpg'), null, 'not HTTPS');
+  assert.equal(ms.registerArt('https://example.com/x.jpg'), null, 'not a YouTube image host');
+  assert.equal(ms.registerArt('https://ytimg.com.evil.example/x.jpg'), null);
+
+  const broken = 'https://i.ytimg.com/vi/broken/hq.jpg';
+  const fallback = await fetch(base + ms.registerArt(broken), { redirect: 'manual' });
+  assert.equal(fallback.status, 302, 'conversion failed: the renderer gets the original');
+  assert.equal(fallback.headers.get('location'), broken);
+  assert.equal((await fetch(`${base}/art/${'0'.repeat(32)}.jpg`)).status, 404);
+});

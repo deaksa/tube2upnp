@@ -1,18 +1,21 @@
 // One UPnP MediaRenderer exposed as one YouTube cast receiver.
 
+import { createHash } from 'node:crypto';
 import YouTubeCastReceiver, { Player, PLAYER_STATUSES, AUTOPLAY_MODES } from 'yt-cast-receiver';
 import { RendererDataStore } from './dataStore.js';
-import { fetchDescription, buildDidl, sinkAccepts } from './upnp.js';
+import { fetchDescription, fetchScpd, fetchIcon, pickIcon, didlTitle, buildDidl, sinkAccepts } from './upnp.js';
 import { localAddressFor } from './net.js';
 import { callAction, parseSink, UpnpError } from './soap.js';
 import { FORMATS, FALLBACK_CHAIN, FILE_FORMATS, dlnaFeatures, mimeOf } from './formats.js';
 import { fmt as fmtSec } from './sponsorblock.js';
 import { stats } from './stats.js';
+import { YamahaExtendedControl } from './yamaha.js';
 
 // A next track that can't be prepared (unavailable, age-restricted, 403s) is retried
 // after this long, doubling per failure - not on every poll.
 const PREFETCH_RETRY_MS = 30 * 1000;
 const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
+const MAX_UNPLAYABLE_IN_A_ROW = 5;
 
 export class Renderer extends Player {
   #call;
@@ -32,10 +35,21 @@ export class Renderer extends Player {
   #sb = { videoId: null, segments: [], skipped: new Set(), loading: false, timer: null };
   #listen = { videoId: null, playedMs: 0, lastTick: 0, counted: false }; // for the play history
   #polls = 0;
+  #volume = null;          // { raw, muted } last read from the renderer, for the status page
+  #volumeRange = null;     // { min, max } of its Volume variable (SCPD), when it says
+  #volumeDb = null;        // dB as the device itself shows it (GetVolumeDB), when it has that
+  #volumeDbUnit = 256;     // GetVolumeDB is in 1/256 dB per the spec; some devices send plain dB
+  #scpd = { rc: null, avt: null }; // { actions, ranges } of RenderingControl and AVTransport
+  #external = null;        // what the renderer plays when it isn't playing for us
+  #allowedActions = null;  // GetCurrentTransportActions: what the renderer allows right now
+  #yxc = null;             // Yamaha Extended Control client, for MusicCast devices
+  #vendor = null;          // last YXC status: { power, input, inputText, volume, playing }
   #current = null;         // { video, format, startAt, loadedAt, fetched }
   #queued = null;          // prepared next track: { video, item, sentToRenderer }
   #advanced = null;        // queued track the renderer already switched to by itself
   #prefetching = false;
+  #trackFailed = false;    // the last #load failed on the track itself (yt-dlp, download), not the device
+  #unplayable = 0;         // tracks skipped in a row because they couldn't be played
   #prefetchFailures = new Map(); // videoId -> { count, until }
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
@@ -62,10 +76,12 @@ export class Renderer extends Player {
     this.history = deps.history ?? null;
     this.media = deps.mediaServer;
     this.createReceiver = deps.createReceiver ?? ((player, opts) => new YouTubeCastReceiver(player, opts));
+    this.onTerminate = deps.onTerminate ?? null;
     this.baseLog = deps.logger;
     this.log = deps.logger.child(`[${address}]`);
     this.name = null;
     this.description = null;
+    this.icon = null; // { type, data }: served by the status page (its CSP blocks LAN http images)
     this.nowPlaying = null;
     this.lastError = null;
     this.refresh(maxAge);
@@ -74,11 +90,6 @@ export class Renderer extends Player {
   refresh(maxAge = this.maxAge) {
     this.maxAge = maxAge;
     this.lastSeen = Date.now();
-  }
-
-  isStale() {
-    // Allow a grace period: many devices re-announce exactly at max-age.
-    return Date.now() - this.lastSeen > this.maxAge * 1000 * 1.5;
   }
 
   get receiverStatus() {
@@ -139,6 +150,23 @@ export class Renderer extends Player {
       this.log.debug('GetProtocolInfo failed (will assume source format works):', err.message);
     }
 
+    // What the device implements, from its service descriptions: the volume scale (UPnP
+    // leaves it to the device), whether it reports dB, and its transport actions. Optional
+    // calls are only made when listed, so they don't pile up as SOAP errors.
+    const scpd = (svc) => fetchScpd(desc.services[`urn:upnp-org:serviceId:${svc}`]?.SCPDURL).catch(() => null);
+    [this.#scpd.rc, this.#scpd.avt] = await Promise.all([scpd('RenderingControl'), scpd('AVTransport')]);
+    this.#volumeRange = this.#scpd.rc?.ranges.Volume ?? null;
+    if (this.#scpd.rc?.actions.has('GetVolumeDBRange')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDBRange', { InstanceID: 0, Channel: 'Master' });
+      // A range within +-200 can't be 1/256 dB units (that would be under 1 dB): plain dB.
+      const span = Math.max(Math.abs(Number(r?.MinValue) || 0), Math.abs(Number(r?.MaxValue) || 0));
+      if (span && span <= 200) this.#volumeDbUnit = 1;
+    }
+    const icon = pickIcon(desc.icons ?? []);
+    if (icon) this.icon = await fetchIcon(icon.url).catch(() => null);
+    this.#yxc = await this.#findYxc(desc);
+    await this.refreshStatus();
+
     this.#ip = this.cfg.advertiseIp ?? await localAddressFor(this.address);
 
     this.#store = new RendererDataStore(this.cfg.dataDir, this.udn);
@@ -174,6 +202,7 @@ export class Renderer extends Player {
     this.#receiver.on('terminate', (err) => {
       this.lastError = `Receiver terminated: ${err.message}`;
       this.log.error(this.lastError);
+      this.onTerminate?.(err); // the device manager restarts it
     });
 
     await this.#receiver.start();
@@ -233,7 +262,33 @@ export class Renderer extends Player {
       this.log.info(`Now playing "${adv.item.info.title}" (continued gaplessly)`);
       return true;
     }
-    return this.#load(video, position);
+    const ok = await this.#load(video, position);
+    if (!ok && this.#trackFailed) this.#skipUnplayable(video);
+    return ok;
+  }
+
+  /**
+   * A track YouTube won't give us (needs sign-in, removed, region-locked) shouldn't stop the
+   * playlist: move on to the next one, like the YouTube apps do. Only for failures of the
+   * track itself - a device that refuses Play (switched off) would fail the next one too -
+   * and only a few in a row, so a dead yt-dlp can't run through the whole queue.
+   */
+  #skipUnplayable(video) {
+    const seq = this.#loadSeq;
+    const timer = setTimeout(async () => {
+      // Player.play() has reported STOPPED by now. A new cast or skip since then wins.
+      if (this.#destroyed || seq !== this.#loadSeq || this.status !== PLAYER_STATUSES.STOPPED
+          || this.queue.current?.id !== video.id) return;
+      if (++this.#unplayable > MAX_UNPLAYABLE_IN_A_ROW) {
+        this.log.error(`${MAX_UNPLAYABLE_IN_A_ROW} tracks in a row could not be played - stopping`
+          + ' (check yt-dlp in the log; YouTube may want cookies, see YTDLP_EXTRA_ARGS)');
+        this.#unplayable = 0;
+        return;
+      }
+      this.log.warn(`Skipping ${video.id}: it can't be played - on to the next track`);
+      await this.next().catch((err) => this.log.error('Skipping to the next track failed:', err.message));
+    }, this.cfg.skipUnplayableDelayMs ?? 1000);
+    timer.unref?.();
   }
 
   /**
@@ -245,12 +300,16 @@ export class Renderer extends Player {
   async #load(video, position, format = null, { offsetStart = false } = {}) {
     const seq = ++this.#loadSeq;
     this.#stopPolling();
+    this.#trackFailed = false;
     try {
       // Already prepared in the background while the previous track played?
       const prepared = !format && !offsetStart && position < 2 && this.#queued?.video.id === video.id
         ? this.#queued.item : null;
       this.#queued = null; // the renderer's "next" slot is re-sent after this load
-      const item = prepared ?? await this.#prepareItem(video, position, format, offsetStart);
+      const item = prepared ?? await this.#prepareItem(video, position, format, offsetStart).catch((err) => {
+        this.#trackFailed = true;
+        throw err;
+      });
       if (seq !== this.#loadSeq) return false; // superseded by a newer play()
       if (prepared) this.log.info(`Using prepared track "${item.info.title}"`);
 
@@ -300,10 +359,14 @@ export class Renderer extends Player {
     current.streamPath = streamPath;
     const url = `http://${this.#ip}:${this.cfg.mediaPort}${streamPath}`;
     const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
+    // The cover from our own server (plain HTTP, small JPEG); the thumbnail itself if it can't be.
+    const artPath = info.thumbnail ? this.media.registerArt?.(info.thumbnail) : null;
     const metadata = buildDidl({
       url, protocolInfo,
       title: info.title, artist: info.artist, album: info.album,
-      albumArt: info.thumbnail, duration: Math.max(0, info.duration - startAt),
+      albumArt: artPath ? `http://${this.#ip}:${this.cfg.mediaPort}${artPath}` : info.thumbnail,
+      albumArtProfile: artPath ? 'JPEG_SM' : null,
+      duration: Math.max(0, info.duration - startAt),
       isVideo: mime.startsWith('video/'),
     });
     return { current, info, format, mime, url, streamPath, metadata };
@@ -314,6 +377,11 @@ export class Renderer extends Player {
     // A reload of the same video (seek restart, format change) keeps its skip state.
     if (this.#current?.video.id !== item.current.video.id) this.#resetSkips();
     item.current.loadedAt = Date.now();
+    this.#unplayable = 0;
+    // The YouTube app takes the position from the state we send when the track starts and
+    // counts on by itself. Right after a switch some renderers (Yamaha) still report the
+    // previous track's clock, so the app would run ahead by a whole track: send it again.
+    item.current.resyncAt = Date.now() + (this.cfg.positionResyncMs ?? 4000);
     this.#current = item.current;
     this.nowPlaying = {
       videoId: item.current.video.id, title: item.info.title, artist: item.info.artist,
@@ -533,6 +601,16 @@ export class Renderer extends Player {
   }
 
   async doResume() {
+    const c = this.#current;
+    if (c?.stoppedAt != null) {
+      // Stopped on the device (switched off, stop button): Play would start the track over,
+      // or fail on a speaker in standby. Load it again where it stopped.
+      this.log.info(`Resuming "${this.nowPlaying?.title ?? c.video.id}" at ${Math.floor(c.stoppedAt)}s`);
+      const ok = await this.#load(c.video, c.stoppedAt, c.format);
+      // Still off: keep the track where it was and keep watching the device.
+      if (!ok && this.#current === c && !this.#destroyed) this.#startPolling();
+      return ok;
+    }
     return this.#ok('AVTransport', 'Play', { InstanceID: 0, Speed: 1 });
   }
 
@@ -559,6 +637,11 @@ export class Renderer extends Player {
   async doSeek(position) {
     const c = this.#current;
     if (!c) return false;
+    if (c.stoppedAt != null) { // nothing loaded on the device: just where to resume from
+      c.stoppedAt = Math.max(0, position);
+      return true;
+    }
+    c.lastRel = position;
     if (!FORMATS[c.format].seekable) {
       // Restart the stream from the new position. Takes a moment longer than a
       // native seek (ffmpeg has to reconnect), but works on every renderer.
@@ -578,20 +661,153 @@ export class Renderer extends Player {
     // SetMute is optional in RenderingControl; don't fail the whole call if absent.
     await this.#safeCall('RenderingControl', 'SetMute',
       { InstanceID: 0, Channel: 'Master', DesiredMute: volume.muted ? 1 : 0 });
+    if (okLevel) this.#volume = { raw: Math.round(volume.level), muted: Boolean(volume.muted) };
     return okLevel;
   }
 
   async doGetVolume() {
     const r = await this.#safeCall('RenderingControl', 'GetVolume', { InstanceID: 0, Channel: 'Master' });
     const m = await this.#safeCall('RenderingControl', 'GetMute', { InstanceID: 0, Channel: 'Master' });
-    return {
+    const v = {
       level: r ? Number.parseInt(r.CurrentVolume, 10) || 0 : 50,
       muted: m ? ['1', 'true'].includes(String(m.CurrentMute).toLowerCase()) : false,
+    };
+    if (r) this.#volume = { raw: v.level, muted: v.muted };
+    return v;
+  }
+
+  /** Read the volume for the status page (the device checks call this; so does playback polling). */
+  async refreshVolume() {
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: false });
+    return this.#volume;
+  }
+
+  async #refreshUpnpVolume() {
+    await this.doGetVolume();
+    if (this.#scpd.rc?.actions.has('GetVolumeDB')) {
+      const r = await this.#safeCall('RenderingControl', 'GetVolumeDB', { InstanceID: 0, Channel: 'Master' });
+      const v = Number.parseInt(r?.CurrentVolume, 10);
+      this.#volumeDb = Number.isFinite(v) ? Math.round((v / this.#volumeDbUnit) * 10) / 10 : null;
+    }
+  }
+
+  /** Everything the status page shows besides our own playback. Called by the device checks. */
+  async refreshStatus() {
+    await this.#refreshUpnpVolume();
+    if (this.#yxc) await this.#refreshVendor({ withPlayInfo: !this.#current });
+    await this.#refreshExternal();
+    if (this.#scpd.avt?.actions.has('GetCurrentTransportActions')) {
+      const r = await this.#safeCall('AVTransport', 'GetCurrentTransportActions', { InstanceID: 0 });
+      if (r) this.#allowedActions = (r.Actions ?? '').split(',').map((a) => a.trim()).filter(Boolean);
+    }
+  }
+
+  /**
+   * A Yamaha MusicCast device announces its YXC API in the description. Some Yamaha
+   * descriptions don't, so for those the standard path is tried on the same host: on
+   * port 80, where MusicCast serves it (the description is on another port, like 49154),
+   * then on the description's port.
+   */
+  async #findYxc(desc) {
+    if (desc.yxcBase) return new YamahaExtendedControl(desc.yxcBase);
+    if (!/yamaha/i.test(desc.manufacturer)) return null;
+    const loc = new URL(this.location);
+    const bases = new Set([`http://${loc.hostname}/YamahaExtendedControl/v1/`,
+      new URL('/YamahaExtendedControl/v1/', loc).toString()]);
+    for (const base of bases) {
+      const guess = new YamahaExtendedControl(base);
+      if (await guess.works()) return guess;
+    }
+    return null;
+  }
+
+  /** The cover of what plays on another source, fetched once per URL (Yamaha changes the URL per track). */
+  async #refreshArt(url) {
+    if (url === (this.art?.url ?? null)) return;
+    const img = url ? await fetchIcon(url, { maxBytes: 1024 * 1024 }).catch(() => null) : null;
+    // Remember a failed URL too, so it isn't fetched again on every check. The version is
+    // the image's hash, so the page's cached cover is never one from before a restart.
+    this.art = url ? {
+      url, type: img?.type ?? null, data: img?.data ?? null,
+      version: img ? createHash('sha256').update(img.data).digest('hex').slice(0, 16) : null,
+    } : null;
+  }
+
+  async #refreshVendor(opts) {
+    try {
+      const s = await this.#yxc.status(opts);
+      // A volume-only read keeps what the last full read found playing.
+      if (!opts.withPlayInfo && this.#vendor?.input === s.input) s.playing = this.#vendor.playing;
+      if (!this.#vendor) this.log.debug(`Yamaha Extended Control: ${s.power}, input ${s.input}`);
+      this.#vendor = s;
+    } catch (err) {
+      if (this.#vendor) this.log.debug('Yamaha Extended Control failed:', err.message);
+      this.#vendor = null; // the UPnP numbers are shown instead
+    }
+  }
+
+  /** Is the renderer busy with something else (Spotify, radio, another input)? Only asked while we're idle. */
+  async #refreshExternal() {
+    if (this.#current) {
+      this.#external = null;
+      this.art = null;
+      return;
+    }
+    // UPnP only sees the device's own DLNA playback (its "server" input). YXC knows the
+    // tuner, net radio, Spotify, HDMI... and that a speaker in standby plays nothing.
+    const v = this.#vendor;
+    if (v && (v.power !== 'on' || v.input !== 'server')) {
+      const p = v.playing;
+      const off = v.power !== 'on' || p?.playback === 'stop';
+      await this.#refreshArt(off ? null : p?.art ?? null);
+      this.#external = off ? null : {
+        state: p?.playback === 'pause' ? 'PAUSED_PLAYBACK' : 'PLAYING',
+        title: p?.title ?? null, artist: p?.artist ?? null, source: p?.station ?? v.inputText,
+        art: this.art?.version ?? null,
+      };
+      return;
+    }
+    this.art = null;
+    const state = await this.#transportState();
+    if (state !== 'PLAYING' && state !== 'PAUSED_PLAYBACK') {
+      this.#external = null;
+      return;
+    }
+    const m = await this.#safeCall('AVTransport', 'GetMediaInfo', { InstanceID: 0 });
+    const uri = m?.CurrentURI ?? '';
+    if (/\/stream\/[0-9a-f]{32}\./.test(uri)) { // still one of ours
+      this.#external = null;
+      return;
+    }
+    const p = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
+    const meta = didlTitle(p?.TrackMetaData) ?? didlTitle(m?.CurrentURIMetaData);
+    this.#external = { state, title: meta?.title ?? null, artist: meta?.artist ?? null, source: sourceOf(uri) };
+  }
+
+  /** Volume as a percentage of the device's own range. */
+  #volumeInfo() {
+    // YXC has the master volume as the display shows it; RenderingControl may not follow it.
+    const y = this.#vendor?.volume;
+    if (y) {
+      return {
+        level: Math.round(((Math.min(y.max, Math.max(0, y.raw))) / y.max) * 100), raw: y.raw, min: 0, max: y.max,
+        muted: y.muted, rangeKnown: true, db: y.db ?? this.#volumeDb,
+      };
+    }
+    const v = this.#volume;
+    if (!v) return null;
+    const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
+    const clamped = Math.min(max, Math.max(min, v.raw));
+    return {
+      level: Math.round(((clamped - min) / (max - min)) * 100), raw: v.raw, min, max, muted: v.muted,
+      rangeKnown: Boolean(this.#volumeRange), db: this.#volumeDb,
     };
   }
 
   async doGetPosition() {
     const c = this.#current;
+    if (c?.stoppedAt != null) return c.stoppedAt;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     // Right after a track change some renderers still report the previous track for a
     // moment. If the renderer names a different stream than ours, its numbers aren't ours.
@@ -607,6 +823,24 @@ export class Renderer extends Player {
     if (this.nowPlaying?.duration) return this.nowPlaying.duration;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     return r && !this.#isStale(r.TrackURI) ? parseHms(r.TrackDuration) : 0;
+  }
+
+  /**
+   * Did the track stop because it reached its end? Only when the renderer stopped close to
+   * it. If its position never moved (some renderers report none), we can't tell: assume so.
+   */
+  #endedNaturally() {
+    const c = this.#current;
+    const dur = this.#position?.dur;
+    if (!c || !dur || !((c.maxRel ?? 0) > c.startAt + 5)) return true;
+    const slack = Math.max(10, (3 * this.cfg.pollIntervalMs) / 1000);
+    return dur - (c.lastRel ?? 0) <= slack;
+  }
+
+  /** Does the renderer name our current stream? (Not just "not stale": an empty URI says nothing.) */
+  #playsOurs(uri) {
+    const ours = this.#current?.streamPath;
+    return Boolean(uri && ours && uri.includes(ours));
   }
 
   /** Does the renderer report a stream other than the one we're playing? */
@@ -655,7 +889,7 @@ export class Renderer extends Player {
       name: this.name,
       friendlyName: this.description?.friendlyName ?? null,
       manufacturer: this.description?.manufacturer ?? '',
-      model: [this.description?.modelName, this.description?.modelNumber].filter(Boolean).join(' '),
+      model: modelText(this.description),
       address: this.address,
       advertisedIp: this.#ip,
       dialPort: this.port,
@@ -670,6 +904,14 @@ export class Renderer extends Player {
       sponsorblock: this.#sb.videoId && this.#sb.videoId === this.#current?.video.id
         ? { segments: this.#sb.segments, skipped: this.#sb.skipped.size } : null,
       lastError: this.lastError,
+      presentationURL: this.description?.presentationURL ?? null,
+      icon: Boolean(this.icon),
+      external: this.#external,
+      power: this.#vendor?.power ?? null,
+      actions: {
+        supported: this.#scpd.avt ? [...this.#scpd.avt.actions].sort() : null,
+        allowed: this.#allowedActions,
+      },
       format: {
         mode: this.formatMode, override: this.#formatOverride, global: this.cfg.outputFormat,
         learned: this.#learnedFormat, current: this.#current?.format ?? null,
@@ -678,6 +920,7 @@ export class Renderer extends Player {
       sink: (this.#protocols ?? []).map((x) => x.contentFormat).filter(Boolean),
       soap: { ...this.#soap, avgMs: this.#soap.calls ? Math.round(this.#soap.totalMs / this.#soap.calls) : null },
       polls: this.#polls,
+      volume: this.#volumeInfo(),
       lastSeenS: Math.round((Date.now() - this.lastSeen) / 1000),
     };
   }
@@ -755,6 +998,8 @@ export class Renderer extends Player {
     if (!state || this.#destroyed) return;
     this.#transport = state;
     if (state !== 'PLAYING') this.#listen.lastTick = 0; // paused/buffering time doesn't count
+    // A knob or remote can change the volume during playback; keep the status page close behind.
+    if (state === 'PLAYING' && this.#polls % 3 === 0) this.refreshVolume().catch(() => {});
     if (state === 'PLAYING' || state === 'PAUSED_PLAYBACK') {
       const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
       if (r) {
@@ -771,6 +1016,16 @@ export class Renderer extends Player {
           dur: this.nowPlaying?.duration || (stale ? 0 : parseHms(r.TrackDuration)),
           uri, at: Date.now(),
         };
+        const c = this.#current;
+        if (!stale && c) {
+          const rel = this.#position.rel;
+          c.maxRel = Math.max(c.maxRel ?? 0, rel);
+          // Where it really is. A jump back to the start mid-track is a renderer resetting its
+          // clock (switching off, stopping), not playback: our own seeks set lastRel themselves.
+          if (!(rel <= c.startAt + 1 && (c.lastRel ?? 0) > c.startAt + 5)) c.lastRel = rel;
+          // Started again on the device - only if it's our stream (see the PLAYING branch below).
+          if (state === 'PLAYING' && rel > c.startAt + 1 && this.#playsOurs(uri)) c.stoppedAt = null;
+        }
       }
     }
     if (this.#destroyed) return;
@@ -785,6 +1040,12 @@ export class Renderer extends Player {
     }
 
     if (state === 'PLAYING') {
+      if (this.#current?.stoppedAt != null) {
+        // Stopped on the device, and now it plays something else: a Yamaha switched on again
+        // resumes whatever it last played from another media server. Not ours: stay paused,
+        // count nothing, skip nothing. Play in the app loads our track again.
+        return;
+      }
       if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
       this.#countListen(); // before a gapless switch below hands over to the next track
@@ -804,19 +1065,56 @@ export class Renderer extends Player {
         }
         return;
       }
+      const c = this.#current;
+      if (c?.resyncAt && Date.now() >= c.resyncAt && !this.#isStale(this.#position?.uri)
+          && this.status === PLAYER_STATUSES.PLAYING) {
+        c.resyncAt = 0;
+        await this.notifyExternalStateChange(); // same status, the renderer's position now
+      }
       this.#maintainNext().catch(() => {}); // background: don't hold up polling
       this.#checkSkip().catch((err) => this.log.debug('SponsorBlock check failed:', err.message));
     } else if (state === 'PAUSED_PLAYBACK') {
       if (this.status === PLAYER_STATUSES.PLAYING) await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
     } else if ((state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') && this.#sawPlaying
                && this.status === PLAYER_STATUSES.PLAYING) {
-      // Track ended on the renderer (or someone pressed stop on the device).
-      // Advance the YouTube queue - this is what makes playlists/autoplay work.
+      if (!this.#endedNaturally()) {
+        // Switched off or stopped on the device mid-track: skipping would only send the next
+        // track to a speaker in standby. Show it paused here; Play loads it again from here.
+        const c = this.#current;
+        c.stoppedAt = c.lastRel;
+        this.log.info(`Stopped on the renderer at ${fmtSec(c.stoppedAt)} of ${fmtSec(this.#position.dur)}`
+          + ' (switched off or stopped on the device) - pausing instead of skipping');
+        await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
+        return;
+      }
+      // Track ended on the renderer. Advance the YouTube queue - this is what makes
+      // playlists/autoplay work.
       this.#stopPolling();
       this.log.info('Track finished on renderer - advancing queue');
       await this.next();
     }
   }
+}
+
+/** "RX-V4A", not "RX-V4A V4A": some devices repeat the model number in the name. */
+function modelText(desc) {
+  const name = desc?.modelName ?? '';
+  const number = desc?.modelNumber ?? '';
+  return number && !name.includes(number) ? [name, number].filter(Boolean).join(' ') : name;
+}
+
+/** A short name for where a URI the renderer plays comes from: a host, or a scheme like spotify. */
+function sourceOf(uri) {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri ?? '')?.[1]?.toLowerCase();
+  if (!scheme) return null;
+  if (scheme === 'http' || scheme === 'https') {
+    try {
+      return new URL(uri).hostname;
+    } catch {
+      return null;
+    }
+  }
+  return scheme.replace(/^x-(sonos-|rincon-)?/, ''); // x-sonos-spotify -> spotify
 }
 
 function hms(sec) {

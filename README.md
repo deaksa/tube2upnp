@@ -8,13 +8,29 @@ Run Tube2U[PnP] on any always-on machine on your LAN. It discovers every UPnP/DL
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant App as 📱 YouTube app
+    participant RX as Tube2U[PnP]<br/>cast receiver
+    participant MS as Tube2U[PnP]<br/>media server
+    participant YT as YouTube
+    participant SPK as 🔊 UPnP/DLNA speaker
+
+    Note over RX,SPK: SSDP finds the speakers on the LAN, one cast receiver each
+    App->>RX: Cast (DIAL + lounge): play this video
+    RX->>YT: yt-dlp: video ID → stream URL
+    RX->>SPK: UPnP SOAP: play /stream/#lt;token#gt;
+    SPK->>MS: HTTP GET /stream/#lt;token#gt;
+    MS->>YT: HTTPS: fetch the audio
+    MS-->>SPK: as-is, losslessly remuxed (ffmpeg) or MP3
+    loop while playing
+        RX->>SPK: poll state and position, queue the next track
+    end
+    App->>RX: pause · seek · skip · volume
+    RX->>SPK: UPnP SOAP
 ```
-YouTube app ──DIAL/lounge──▶ Tube2U[PnP] (one cast receiver per renderer)
-                                 │ yt-dlp resolves the video ID to a stream URL
-                                 ▼
-Renderer ◀──HTTP /stream/<token>── media server ──HTTPS──▶ googlevideo.com
-         (as-is, losslessly remuxed with ffmpeg, or MP3 as a last resort)
-```
+
+The speaker never talks to YouTube itself: it plays a short link on Tube2U[PnP]'s media server, which passes the audio through as-is, remuxes it losslessly with ffmpeg, or transcodes it to MP3 as a last resort.
 
 ### Stream formats
 
@@ -81,7 +97,18 @@ SSDP and DIAL use LAN multicast, so the container needs `network_mode: host`.
 
 Open `http://<host>:8080/` in a browser. It has five views:
 
-- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. Here you can also:
+- **Speakers** shows each renderer's display: cover, title, progress, and the prepared next track. For each speaker it also shows:
+  - its own icon, and a **Device page** link that opens the speaker's web page (settings, inputs) in a new tab, when the speaker has one;
+  - the volume it reports, with dB where the speaker gives it (as an AV receiver's display shows it);
+  - **Playing another source** when it's busy with something that isn't Tube2U[PnP], such as Spotify, radio or another input, with the title when the speaker tells.
+  - On Yamaha MusicCast devices (AV receivers, speakers), these come from Yamaha Extended Control as well, because UPnP only sees their own DLNA playback. Then the page also shows the tuner station, the net radio song and station (with its cover art), the HDMI input, **Standby**, and the master volume in dB as the display shows it.
+
+  Speakers found once are remembered, with a fixed port, and stay on the list:
+  - **Offline** when a remembered speaker stops answering (it's checked every `DEVICE_CHECK_INTERVAL` seconds). Its cast receiver stops, so it leaves the cast menu, and starts again on the same port when the speaker is back.
+  - **Not working** when it answers but its receiver couldn't start (the reason is shown, and it's retried).
+  - **Remove** forgets an offline speaker: its port and saved settings are freed, and it's set up as new if it comes back. **Ignore** stops a speaker and keeps it out until you choose **Allow again** under *Ignored speakers*.
+
+  For a running speaker you can also:
   - choose the **stream format for that speaker**. Same as default, Detect automatically, or a fixed format. It's saved per speaker and applied immediately: a playing track reloads at its current position.
   - clear a detected format, so it's detected again.
   - get a **TV code** for the YouTube app.
@@ -92,7 +119,7 @@ Open `http://<host>:8080/` in a browser. It has five views:
   - yt-dlp lookup times (median and 95th percentile) and cache hits
   - downloads, 403 retries, MP4/FLAC build times, and the disk cache
   - UPnP round trips
-  - per speaker: accepted formats, gapless support, and SOAP errors
+  - per speaker: accepted formats, gapless support, SOAP errors, how long it has been online (and dropouts since start), the round trip of its reachability check, and the transport actions it implements and allows right now
 - **Settings:** SponsorBlock on or off, and which categories to skip.
 
 The page is meant for your LAN. If other people or devices share that network, set `STATUS_TOKEN` and open the page as `/?token=<token>`. You can also limit it to one address with `STATUS_BIND`, or turn it off with `STATUS_PORT=0`. Requests that change settings must come from the page itself, so other websites can't send them from your browser.
@@ -121,7 +148,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 |---|---|---|
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` |
 | `ADVERTISE_IP` | auto | IP that renderers and phones use to reach us. By default it's auto-detected per renderer from the routing table. Setting it also pins DIAL to that address. |
-| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each renderer takes the next free port. |
+| `RECEIVER_BASE_PORT` | `3000` | First DIAL port. Each speaker gets its own port and keeps it across restarts (remembered in `DATA_DIR/devices.json`). A removed speaker's port is reused. |
 | `MEDIA_PORT` | `8000` | Streaming port |
 | `STATUS_PORT` | `8080` | Status page. `0` disables it. |
 | `STATUS_TOKEN` | – | If set, the status page's API requires this token (open the page as `/?token=…`) |
@@ -140,7 +167,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `YTDLP_UPDATE_HOURS` | `24` | Self-update interval. `0` disables it. |
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
-| `DATA_DIR` | `./data` (`/data` in Docker) | Per-renderer screen IDs, so phones remember the receivers |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Remembered speakers and their ports, per-renderer screen IDs (so phones remember the receivers), settings, history and the cache |
 | `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
 | `AUTOPLAY` | `true` | Enable YouTube autoplay when a sender connects |
@@ -152,12 +179,15 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `HISTORY` | `true` | Keep a playback history (see [Playback history](#playback-history)) |
 | `HISTORY_MAX` | `5000` | Individual plays kept in the history list. Play counts are kept regardless. |
 | `HISTORY_MIN_PLAY_S` | `30` | Seconds a track must play (or half its length, if shorter) to count as played |
-| `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches |
+| `DISCOVERY_INTERVAL` | `300` | Seconds between SSDP searches for new speakers |
+| `DEVICE_CHECK_INTERVAL` | `30` | Seconds between direct checks of remembered speakers (minimum 5) |
+| `DEVICE_OFFLINE_AFTER` | `3` | Missed checks in a row before a speaker is shown offline and its receiver stops (twice as many during playback) |
 
 ## Troubleshooting
 
 **The speaker doesn't appear in the Cast menu.**
 - Check the logs or the status page first. If the renderer is listed there, discovery towards the speaker works, and the problem is between the phone and Tube2U[PnP].
+- If the status page lists it as **Offline** although it's on, it isn't answering Tube2U[PnP]'s checks (its network may sleep in standby, or a firewall is in the way). It comes back on its own when it answers again; raise `DEVICE_OFFLINE_AFTER` if it drops out too eagerly. If it's under **Ignored speakers**, choose **Allow again**.
 - Phone and server must be on the same L2 network. Guest Wi-Fi, client isolation and "multicast enhancement" on some access points all block DIAL.
 - As a workaround, use **Link with TV code**. Tap "TV code" on the status page, then in the YouTube app go to Settings → Watch on TV → Link with TV code. This uses YouTube's servers instead of local discovery.
 
@@ -173,6 +203,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
   - Update yt-dlp first. This happens automatically by default.
   - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.
   - If the server's IP is flagged, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
+- A track that yt-dlp can't get at all (it needs a sign-in, or it's removed or region-locked) is skipped, and the queue goes on with the next one, as in the YouTube apps. After 5 such tracks in a row, playback stops, and the log tells you to check yt-dlp. A speaker that refuses to play (for example in standby) is never skipped through.
 
 **Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, Tube2U[PnP] restarts the stream from the new position, so a seek takes a second or two longer.
 
@@ -186,9 +217,9 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Crash fixes:** UPnP client errors no longer kill the process. Renderer setup failures are retried with a back-off.
 - **Media server:** one shared server with short tokenised URLs. Unknown paths get a 404, so it can't be used as an open proxy. Range passthrough, DLNA headers, and the renderer is addressed by IP instead of `os.hostname()`.
 - **Lossless format conversion** (non-fragmented MP4 or ADTS AAC via ffmpeg remux, or FLAC), MP3 only as a last resort; the working format is detected and remembered per renderer. Seeking works in every format.
-- **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays.
+- **Metadata:** title, artist and cover art are sent in DIDL-Lite, so they appear on renderer displays. The cover comes from Tube2U[PnP]'s media server as a 480×480 JPEG over plain HTTP (DLNA `JPEG_SM`), cropped to the square in the middle of the YouTube thumbnail. Many renderers can't load the thumbnail itself: it's HTTPS, often WebP, and 16:9. Without ffmpeg the renderer gets the original thumbnail.
 - **Queue and autoplay:** end of track is detected and the YouTube queue advances. The next track is prepared in advance, and played gaplessly where the renderer supports it.
-- **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, moved devices are recreated, ports are reused, and receivers are stopped cleanly on shutdown.
+- **Discovery:** SSDP runs on every interface, devices are keyed by UDN rather than URL, byebye messages work, and moved devices are recreated. Speakers are remembered with a fixed port, checked directly so switched-off ones leave the cast menu within a minute or two, and can be removed or ignored on the status page. Receivers are stopped cleanly on shutdown.
 - **Mute** support, plus volume, position and duration via standard UPnP actions.
 - **Status page:** now playing, per-speaker format setting, live logs, stats for nerds, pairing codes. JSON API and `/healthz`, optional token, CSRF protection.
 - **Packaging:** Node 24 and ESM, tests (`npm test`), ESLint, and a non-root Docker image with tini and a healthcheck. GitHub Actions: tests, multi-arch image (amd64/arm64) pushed to GHCR, Trivy container scan, CodeQL, dependency review and Dependabot.
