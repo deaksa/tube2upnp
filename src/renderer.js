@@ -567,6 +567,16 @@ export class Renderer extends Player {
   }
 
   async doResume() {
+    const c = this.#current;
+    if (c?.stoppedAt != null) {
+      // Stopped on the device (switched off, stop button): Play would start the track over,
+      // or fail on a speaker in standby. Load it again where it stopped.
+      this.log.info(`Resuming "${this.nowPlaying?.title ?? c.video.id}" at ${Math.floor(c.stoppedAt)}s`);
+      const ok = await this.#load(c.video, c.stoppedAt, c.format);
+      // Still off: keep the track where it was and keep watching the device.
+      if (!ok && this.#current === c && !this.#destroyed) this.#startPolling();
+      return ok;
+    }
     return this.#ok('AVTransport', 'Play', { InstanceID: 0, Speed: 1 });
   }
 
@@ -593,6 +603,11 @@ export class Renderer extends Player {
   async doSeek(position) {
     const c = this.#current;
     if (!c) return false;
+    if (c.stoppedAt != null) { // nothing loaded on the device: just where to resume from
+      c.stoppedAt = Math.max(0, position);
+      return true;
+    }
+    c.lastRel = position;
     if (!FORMATS[c.format].seekable) {
       // Restart the stream from the new position. Takes a moment longer than a
       // native seek (ffmpeg has to reconnect), but works on every renderer.
@@ -758,6 +773,7 @@ export class Renderer extends Player {
 
   async doGetPosition() {
     const c = this.#current;
+    if (c?.stoppedAt != null) return c.stoppedAt;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     // Right after a track change some renderers still report the previous track for a
     // moment. If the renderer names a different stream than ours, its numbers aren't ours.
@@ -773,6 +789,24 @@ export class Renderer extends Player {
     if (this.nowPlaying?.duration) return this.nowPlaying.duration;
     const r = await this.#safeCall('AVTransport', 'GetPositionInfo', { InstanceID: 0 });
     return r && !this.#isStale(r.TrackURI) ? parseHms(r.TrackDuration) : 0;
+  }
+
+  /**
+   * Did the track stop because it reached its end? Only when the renderer stopped close to
+   * it. If its position never moved (some renderers report none), we can't tell: assume so.
+   */
+  #endedNaturally() {
+    const c = this.#current;
+    const dur = this.#position?.dur;
+    if (!c || !dur || !((c.maxRel ?? 0) > c.startAt + 5)) return true;
+    const slack = Math.max(10, (3 * this.cfg.pollIntervalMs) / 1000);
+    return dur - (c.lastRel ?? 0) <= slack;
+  }
+
+  /** Does the renderer name our current stream? (Not just "not stale": an empty URI says nothing.) */
+  #playsOurs(uri) {
+    const ours = this.#current?.streamPath;
+    return Boolean(uri && ours && uri.includes(ours));
   }
 
   /** Does the renderer report a stream other than the one we're playing? */
@@ -948,6 +982,16 @@ export class Renderer extends Player {
           dur: this.nowPlaying?.duration || (stale ? 0 : parseHms(r.TrackDuration)),
           uri, at: Date.now(),
         };
+        const c = this.#current;
+        if (!stale && c) {
+          const rel = this.#position.rel;
+          c.maxRel = Math.max(c.maxRel ?? 0, rel);
+          // Where it really is. A jump back to the start mid-track is a renderer resetting its
+          // clock (switching off, stopping), not playback: our own seeks set lastRel themselves.
+          if (!(rel <= c.startAt + 1 && (c.lastRel ?? 0) > c.startAt + 5)) c.lastRel = rel;
+          // Started again on the device - only if it's our stream (see the PLAYING branch below).
+          if (state === 'PLAYING' && rel > c.startAt + 1 && this.#playsOurs(uri)) c.stoppedAt = null;
+        }
       }
     }
     if (this.#destroyed) return;
@@ -962,6 +1006,12 @@ export class Renderer extends Player {
     }
 
     if (state === 'PLAYING') {
+      if (this.#current?.stoppedAt != null) {
+        // Stopped on the device, and now it plays something else: a Yamaha switched on again
+        // resumes whatever it last played from another media server. Not ours: stay paused,
+        // count nothing, skip nothing. Play in the app loads our track again.
+        return;
+      }
       if (!this.#sawPlaying) await this.#confirmFormat();
       this.#sawPlaying = true;
       this.#countListen(); // before a gapless switch below hands over to the next track
@@ -993,8 +1043,18 @@ export class Renderer extends Player {
       if (this.status === PLAYER_STATUSES.PLAYING) await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
     } else if ((state === 'STOPPED' || state === 'NO_MEDIA_PRESENT') && this.#sawPlaying
                && this.status === PLAYER_STATUSES.PLAYING) {
-      // Track ended on the renderer (or someone pressed stop on the device).
-      // Advance the YouTube queue - this is what makes playlists/autoplay work.
+      if (!this.#endedNaturally()) {
+        // Switched off or stopped on the device mid-track: skipping would only send the next
+        // track to a speaker in standby. Show it paused here; Play loads it again from here.
+        const c = this.#current;
+        c.stoppedAt = c.lastRel;
+        this.log.info(`Stopped on the renderer at ${fmtSec(c.stoppedAt)} of ${fmtSec(this.#position.dur)}`
+          + ' (switched off or stopped on the device) - pausing instead of skipping');
+        await this.notifyExternalStateChange(PLAYER_STATUSES.PAUSED);
+        return;
+      }
+      // Track ended on the renderer. Advance the YouTube queue - this is what makes
+      // playlists/autoplay work.
       this.#stopPolling();
       this.log.info('Track finished on renderer - advancing queue');
       await this.next();

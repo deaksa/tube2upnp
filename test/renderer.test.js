@@ -728,6 +728,82 @@ test('the YouTube app gets the position again a few seconds into a track (the re
   await r.destroy();
 });
 
+test('switched off mid-track: not skipped; shown paused there, and Play loads it again from there', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  fake.state.relTime = '0:01:20';
+  await wait(200);
+
+  fake.state.transport = 'STOPPED'; // the Yamaha going to standby
+  fake.state.relTime = '0:00:00';
+  await until(() => r.status === 2); // PAUSED
+  await wait(200);
+  assert.equal(nexts, 0, 'not skipped to the next track');
+  assert.equal(r.status, 2);
+  assert.equal(await r.getPosition(), 80, 'the app shows where it stopped');
+
+  const loads = fake.calls.filter((c) => c.action === 'SetAVTransportURI').length;
+  assert.equal(await r.resume(), true);
+  assert.equal(r.status, 1);
+  assert.equal(fake.calls.filter((c) => c.action === 'SetAVTransportURI').length, loads + 1, 'loaded again');
+  assert.match(fake.calls.filter((c) => c.action === 'Seek').at(-1).body, /<Target>0?0:01:20<\/Target>/);
+  await r.destroy();
+});
+
+test('a track that stops at its end, or on a renderer that reports no position, advances the queue', async (t) => {
+  for (const [relTime, why] of [['0:03:26', 'near the end (3:26 of 3:30)'], ['0:00:00', 'position never moved']]) {
+    const fake = await startFakeRenderer();
+    t.after(() => fake.server.close());
+    const { r } = setup(fake);
+    await r.init();
+    r.setLogger(new Logger('none'));
+    let nexts = 0;
+    r.next = async () => { nexts++; return true; };
+    await r.play({ id: A, client: { key: 'YT' } }, 0);
+    fake.state.relTime = relTime;
+    await wait(200);
+    fake.state.transport = 'STOPPED';
+    await until(() => nexts > 0, 1000);
+    assert.equal(nexts, 1, why);
+    await r.destroy();
+  }
+});
+
+test('switched on again playing something else: stays paused, nothing counted or skipped', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.play({ id: A, client: { key: 'YT' } }, 0);
+  fake.state.relTime = '0:01:20';
+  await wait(200);
+  fake.state.transport = 'STOPPED';
+  await until(() => r.status === 2);
+
+  // The Yamaha comes back on and resumes a track from another media server.
+  Object.assign(fake.state, { transport: 'PLAYING', currentUri: 'http://192.168.0.5:9000/music/other.flac', relTime: '0:02:30' });
+  await wait(300);
+  assert.equal(r.status, 2, 'still paused in the app');
+  assert.equal(await r.getPosition(), 80, 'still where ours stopped');
+  fake.state.transport = 'STOPPED'; // the other track ends
+  await wait(300);
+  assert.equal(nexts, 0, 'its end is not ours to advance on');
+
+  assert.equal(await r.resume(), true, 'Play in the app loads ours again');
+  assert.match(fake.state.currentUri, /\/stream\//);
+  assert.equal(r.status, 1);
+  await r.destroy();
+});
+
 test('the renderer gets the cover from our media server when it can serve it', async (t) => {
   const fake = await startFakeRenderer();
   t.after(() => fake.server.close());
