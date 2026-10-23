@@ -336,9 +336,11 @@ test('covers: a YouTube thumbnail is served as a square 480x480 JPEG over HTTP',
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'image/jpeg');
   assert.match(res.headers.get('contentfeatures.dlna.org'), /DLNA\.ORG_PN=JPEG_SM/);
-  const out = path.join(dir, 'cover.jpg');
-  writeFileSync(out, Buffer.from(await res.arrayBuffer()));
-  assert.equal(probe(out, 'stream=codec_name,width,height'), 'mjpeg,480,480');
+  // ffprobe reads the image from stdin: nothing from the network goes to disk.
+  const jpeg = Buffer.from(await res.arrayBuffer());
+  const info = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0', '-i', 'pipe:0'],
+    { input: jpeg }).toString().trim();
+  assert.equal(info, 'mjpeg,480,480');
   assert.deepEqual(fetched, [thumb], 'fetched and converted once');
 
   assert.equal(ms.registerArt('http://i.ytimg.com/vi/x/hq.jpg'), null, 'not HTTPS');
