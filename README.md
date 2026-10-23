@@ -203,6 +203,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
   - Update yt-dlp first. This happens automatically by default.
   - Next, add a PO-token provider: YouTube increasingly requires these tokens for downloads. yt-dlp's wiki has a PO Token Guide; the usual setup is the `bgutil-ytdlp-pot-provider` plugin plus its small companion container.
   - If the server's IP is flagged, pass browser cookies with `YTDLP_EXTRA_ARGS="--cookies /data/cookies.txt"`.
+- A track that yt-dlp can't get at all (it needs a sign-in, or it's removed or region-locked) is skipped, and the queue goes on with the next one, as in the YouTube apps. After 5 such tracks in a row, playback stops, and the log tells you to check yt-dlp. A speaker that refuses to play (for example in standby) is never skipped through.
 
 **Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, Tube2U[PnP] restarts the stream from the new position, so a seek takes a second or two longer.
 
