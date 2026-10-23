@@ -41,6 +41,7 @@ Running the actual service needs multicast on the LAN (SSDP/DIAL), so Docker Des
 - `direct`: proxies googlevideo with Range passthrough. It re-resolves once on 403/410.
 - `adts` / `mp3`: an ffmpeg pipe from the URL. If YouTube refuses ffmpeg before any audio is sent, it retries with a fresh extraction, then from the yt-dlp download. Headers go out with the first audio byte, so a total failure is a 502.
 - `mp4` / `flac` (`FILE_FORMATS`): yt-dlp downloads `<id>.source` into the disk cache, then ffmpeg builds `<id>-<format>-<startAt>.<ext>`. Served with byte ranges. Jobs are coalesced per key (`#once`). Writes go to `.download`/`.part` and are then renamed. The LRU prune uses mtime (touched on every use) and `CACHE_MB`. Files being downloaded, built from or served are pinned (`#pin`), and the file just built is kept, so neither eviction nor `clearCache()` removes them. A file that vanished anyway is rebuilt. `prepare()` builds the file *before* the renderer is told to play.
+- Covers: `registerArt(thumbnailUrl)` (HTTPS YouTube image hosts only) returns `/art/<token>.jpg`: the thumbnail fetched once, without redirects, and converted by ffmpeg into a 480×480 JPEG (`JPEG_SM`). It's kept in memory, 64 covers at most. If conversion fails, the route redirects to the original.
 
 **`Resolver` (src/resolver.js)** runs yt-dlp via `execFile` (never a shell) with strict 11-char video-ID validation. It caches results until the URL's `expire` param, coalesces concurrent lookups, and schedules yt-dlp self-updates.
 

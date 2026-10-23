@@ -326,10 +326,14 @@ export class Renderer extends Player {
     current.streamPath = streamPath;
     const url = `http://${this.#ip}:${this.cfg.mediaPort}${streamPath}`;
     const protocolInfo = `http-get:*:${mime}:${dlnaFeatures(format)}`;
+    // The cover from our own server (plain HTTP, small JPEG); the thumbnail itself if it can't be.
+    const artPath = info.thumbnail ? this.media.registerArt?.(info.thumbnail) : null;
     const metadata = buildDidl({
       url, protocolInfo,
       title: info.title, artist: info.artist, album: info.album,
-      albumArt: info.thumbnail, duration: Math.max(0, info.duration - startAt),
+      albumArt: artPath ? `http://${this.#ip}:${this.cfg.mediaPort}${artPath}` : info.thumbnail,
+      albumArtProfile: artPath ? 'JPEG_SM' : null,
+      duration: Math.max(0, info.duration - startAt),
       isVideo: mime.startsWith('video/'),
     });
     return { current, info, format, mime, url, streamPath, metadata };

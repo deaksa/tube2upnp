@@ -803,3 +803,15 @@ test('switched on again playing something else: stays paused, nothing counted or
   assert.equal(r.status, 1);
   await r.destroy();
 });
+
+test('the renderer gets the cover from our media server when it can serve it', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  r.media.registerArt = (url) => (url === 'https://i/x.jpg' ? `/art/${'a'.repeat(32)}.jpg` : null);
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  const set = fake.calls.find((c) => c.action === 'SetAVTransportURI');
+  assert.match(set.body, /albumArtURI dlna:profileID=&quot;JPEG_SM&quot;&gt;http:\/\/[^&]+:8000\/art\/a{32}\.jpg/);
+  await r.destroy();
+});
