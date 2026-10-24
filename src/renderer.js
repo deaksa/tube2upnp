@@ -16,6 +16,7 @@ import { YamahaExtendedControl } from './yamaha.js';
 const PREFETCH_RETRY_MS = 30 * 1000;
 const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
 const MAX_UNPLAYABLE_IN_A_ROW = 5;
+const PREVIOUS_RESTARTS_AFTER_S = 5;
 
 export class Renderer extends Player {
   #call;
@@ -807,6 +808,51 @@ export class Renderer extends Player {
     };
   }
 
+  /** The volume the status page's slider sets: RenderingControl, the same as the YouTube app's, in percent. */
+  #controlVolume() {
+    const v = this.#volume;
+    if (!v) return null;
+    const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
+    return Math.round(((Math.min(max, Math.max(min, v.raw)) - min) / (max - min)) * 100);
+  }
+
+  /**
+   * Playback controls from the status page. They go through yt-cast-receiver's Player, like
+   * the app's own buttons, so connected YouTube apps follow along. Only for our own track.
+   * @param {'pause'|'resume'|'next'|'previous'|'seek'|'volume'} action
+   * @param {number} [value] - seek: seconds; volume: percent of the device's range
+   */
+  async control(action, value) {
+    const fail = (status, message) => Object.assign(new Error(message), { status });
+    if (!this.nowPlaying || ![PLAYER_STATUSES.PLAYING, PLAYER_STATUSES.PAUSED].includes(this.status)) {
+      throw fail(409, 'Nothing from YouTube is playing on this speaker');
+    }
+    const number = () => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) throw fail(400, `"${action}" needs a number`);
+      return value;
+    };
+    switch (action) {
+      case 'pause': return this.pause();
+      case 'resume': return this.resume();
+      case 'next': return this.next();
+      case 'previous': {
+        // Like the YouTube apps: a few seconds in, "previous" goes back to the start of this track.
+        // Player.previous() with nothing before it would stop playback instead.
+        if ((await this.getPosition()) > PREVIOUS_RESTARTS_AFTER_S || !this.getNavInfo().hasPrevious) return this.seek(0);
+        return this.previous();
+      }
+      case 'seek': return this.seek(Math.max(0, Math.min(number(), Math.max(0, (this.nowPlaying.duration || Infinity) - 1))));
+      case 'volume': {
+        const pct = Math.max(0, Math.min(100, number()));
+        const { min, max } = this.#volumeRange ?? { min: 0, max: 100 };
+        const ok = await this.setVolume({ level: Math.round(min + (pct / 100) * (max - min)), muted: false });
+        this.refreshVolume().catch(() => {}); // the dB and YXC numbers on the page
+        return ok;
+      }
+      default: throw fail(400, `Unknown action "${action}"`);
+    }
+  }
+
   async doGetPosition() {
     const c = this.#current;
     if (c?.stoppedAt != null) return c.stoppedAt;
@@ -923,6 +969,7 @@ export class Renderer extends Player {
       soap: { ...this.#soap, avgMs: this.#soap.calls ? Math.round(this.#soap.totalMs / this.#soap.calls) : null },
       polls: this.#polls,
       volume: this.#volumeInfo(),
+      volumeControl: this.#controlVolume(),
       lastSeenS: Math.round((Date.now() - this.lastSeen) / 1000),
     };
   }

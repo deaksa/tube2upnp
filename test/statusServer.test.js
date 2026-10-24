@@ -18,6 +18,13 @@ function fakeRenderer() {
     setFormatOverride: async (f) => { calls.push(['format', f]); },
     forgetLearnedFormat: async () => { calls.push(['forget']); },
     getPairingCode: async () => '123456789012',
+    control: async (action, value) => {
+      if (!['pause', 'resume', 'next', 'previous', 'seek', 'volume'].includes(action)) {
+        throw Object.assign(new Error(`Unknown action "${action}"`), { status: 400 });
+      }
+      calls.push(['control', action, value]);
+      return true;
+    },
   };
 }
 
@@ -229,4 +236,17 @@ test('speaker icons are served by us, as images only, behind the token', async (
   assert.match(art.headers.get('content-security-policy'), /default-src 'none'/);
   assert.equal((await fetch(base + '/api/renderers/r2/art?token=s3cret')).status, 404);
   assert.equal((await fetch(base + '/api/renderers/r1/art')).status, 401);
+});
+
+test('playback controls go to the renderer, behind the CSRF check', async (t) => {
+  const { base, r } = await start(t);
+  const csrf = { 'X-Tube2upnp': '1' };
+  assert.equal((await post(base + '/api/renderers/r1/control', { action: 'pause' })).status, 403, 'no CSRF header');
+  const res = await post(base + '/api/renderers/r1/control', { action: 'volume', value: 40 }, csrf);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal((await post(base + '/api/renderers/r1/control', { action: 'nope' }, csrf)).status, 400);
+  assert.equal((await post(base + '/api/renderers/r1/control', null, csrf)).status, 400, 'no body: no action');
+  assert.equal((await post(base + '/api/renderers/r2/control', { action: 'next' }, csrf)).status, 404, 'offline');
+  assert.deepEqual(r.calls.filter((c) => c[0] === 'control'), [['control', 'volume', 40]]);
 });
