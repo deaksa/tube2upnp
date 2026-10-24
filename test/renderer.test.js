@@ -894,3 +894,70 @@ test('now playing shows the stream quality; the history records it', async (t) =
   assert.equal(records[0].quality, 'AAC 258 kbps');
   await r.destroy();
 });
+
+test('playback controls: pause, resume, next, seek, volume; only while our track plays', async (t) => {
+  const fake = await startFakeRenderer({ volumeRange: [0, 80] });
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  const count = (action) => fake.calls.filter((c) => c.action === action).length;
+
+  await assert.rejects(r.control('pause'), { status: 409 }, 'nothing playing yet');
+  await r.play(ytVideo(A), 0);
+
+  assert.equal(await r.control('pause'), true);
+  assert.equal(r.status, 2);
+  assert.equal(fake.state.transport, 'PAUSED_PLAYBACK');
+  assert.equal(await r.control('resume'), true);
+  assert.equal(r.status, 1);
+
+  await r.control('seek', 999);
+  assert.match(fake.calls.filter((c) => c.action === 'Seek').at(-1).body, /<Target>0?0:03:29<\/Target>/, 'clamped to the track');
+  await r.control('seek', -5);
+  assert.match(fake.calls.filter((c) => c.action === 'Seek').at(-1).body, /<Target>0?0:00:00<\/Target>/);
+
+  await r.control('volume', 50);
+  assert.equal(fake.state.volume, 40, '50% of the device range 0-80');
+  assert.equal(r.statusInfo().volumeControl, 50);
+
+  let nexts = 0;
+  r.next = async () => { nexts++; return true; };
+  await r.control('next');
+  assert.equal(nexts, 1);
+
+  await assert.rejects(r.control('volume', 'loud'), { status: 400 });
+  await assert.rejects(r.control('jump'), { status: 400 });
+  assert.ok(count('Pause') >= 1);
+  await r.destroy();
+});
+
+test('playback controls: "previous" restarts the track a few seconds in, or with nothing before it', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r } = setup(fake);
+  await r.init();
+  r.setLogger(new Logger('none'));
+  let previous = 0;
+  r.previous = async () => { previous++; return true; };
+  await r.play(ytVideo(A), 0);
+  const seeks = () => fake.calls.filter((c) => c.action === 'Seek').length;
+
+  fake.state.relTime = '0:01:05';
+  let before = seeks();
+  await r.control('previous');
+  assert.equal(seeks(), before + 1, '65 s in: back to the start');
+  assert.equal(previous, 0);
+
+  fake.state.relTime = '0:00:02';
+  r.getNavInfo = () => ({ hasPrevious: true, hasNext: false });
+  await r.control('previous');
+  assert.equal(previous, 1, 'just started, and there is a track before it');
+
+  r.getNavInfo = () => ({ hasPrevious: false, hasNext: false });
+  before = seeks();
+  await r.control('previous');
+  assert.equal(previous, 1);
+  assert.equal(seeks(), before + 1, 'nothing before it: restart instead of stopping');
+  await r.destroy();
+});

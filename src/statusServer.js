@@ -128,6 +128,11 @@ export function startStatusServer(config, { devices, mediaServer, settings, hist
       await renderer(m[1]).forgetLearnedFormat();
       return { ok: true };
     }],
+    ['POST', /^\/api\/renderers\/([^/]+)\/control$/, async (m, _url, req) => {
+      const body = await readJson(req);
+      const { action, value } = body && typeof body === 'object' ? body : {};
+      return { ok: Boolean(await renderer(m[1]).control(action, value)) };
+    }],
     ['POST', /^\/api\/renderers\/([^/]+)\/pair$/, async (m) => ({ code: await renderer(m[1]).getPairingCode() })],
     ['POST', /^\/api\/renderers\/([^/]+)\/remove$/, async (m) => {
       await devices.remove(speakerId(m[1]));
