@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseMessage, udnFromUsn, maxAge } from '../src/ssdp.js';
 import { parseDescription, buildDidl, sinkAccepts, pickIcon, parseScpd, didlTitle } from '../src/upnp.js';
-import { parseHms } from '../src/renderer.js';
+import { parseHms, streamQuality, qualityLabel } from '../src/renderer.js';
 import { urlExpiry, mimeFor, Resolver } from '../src/resolver.js';
 import { yxcBaseFrom } from '../src/yamaha.js';
 import et from 'elementtree';
@@ -148,5 +148,23 @@ test('buildDidl: the cover with its DLNA profile', () => {
 test('buildDidl: the metadata parses as XML with the dlna namespace', () => {
   const x = buildDidl({ url: 'http://h/s', protocolInfo: 'x', title: 'T', albumArt: 'http://a/b.jpg', albumArtProfile: 'JPEG_SM' });
   assert.equal(didlTitle(x)?.title, 'T');
+});
+
+test('streamQuality: what the speaker gets, from yt-dlp or from the cached file', () => {
+  const premium = { acodec: 'mp4a.40.2', abr: 258, asr: 44100, formatId: '141' };
+  assert.deepEqual(streamQuality('direct', premium, null), {
+    codec: 'AAC', kbps: 258, sampleRate: 44100, youtubeFormat: '141', high: true, output: 'direct', outputKbps: null,
+  });
+  // The cached source predates the cookies: the file decides, not the extraction.
+  const cached = streamQuality('mp4', premium, { codec: 'aac', kbps: 130, sampleRate: 44100 });
+  assert.equal(cached.kbps, 130);
+  assert.equal(cached.high, false);
+  assert.equal(cached.youtubeFormat, null);
+  const mp3 = streamQuality('mp3', { acodec: 'opus', abr: 134.6, formatId: '251' }, null, { mp3Bitrate: '192k' });
+  assert.equal(qualityLabel(mp3), 'MP3 192 kbps from Opus 135 kbps');
+  assert.equal(qualityLabel(streamQuality('flac', premium, null)), 'FLAC from AAC 258 kbps');
+  assert.equal(qualityLabel(streamQuality('mp4', premium, null)), 'AAC 258 kbps');
+  assert.equal(streamQuality('direct', {}, null), null, 'nothing known');
+  assert.equal(qualityLabel(null), null);
 });
 

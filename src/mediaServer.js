@@ -176,7 +176,37 @@ export class MediaServer {
 
   /** Do any slow preparation (building mp4/flac files) before the renderer is told to play. */
   async prepare(entry) {
-    if (FILE_FORMATS.includes(entry.format)) await this.#remuxToFile(entry);
+    if (!FILE_FORMATS.includes(entry.format)) return {};
+    const file = await this.#remuxToFile(entry);
+    // The audio actually played: the source on disk may be older than the current
+    // extraction (downloaded at 128 kbps before cookies were set up, say).
+    const src = this.#sourcePath(entry.videoId);
+    const audio = await this.probeAudio(fs.existsSync(src) ? src : entry.format === 'mp4' ? file : null);
+    return { sourceAudio: audio };
+  }
+
+  #probes = new Map(); // `${file}:${mtime}` -> { codec, kbps, sampleRate }
+
+  /** Codec, bitrate and sample rate of a cached file, from ffmpeg's stream info (null if unknown). */
+  async probeAudio(file) {
+    if (!file) return null;
+    let key;
+    try { key = `${file}:${(await fsp.stat(file)).mtimeMs}`; } catch { return null; }
+    if (this.#probes.has(key)) return this.#probes.get(key);
+    const stderr = await new Promise((resolve) => {
+      const ff = spawn(this.cfg.ffmpegPath, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let out = '';
+      ff.stderr.on('data', (d) => { out += d; });
+      ff.on('error', () => resolve(''));
+      ff.on('close', () => resolve(out)); // exits 1 (no output file): only the info is wanted
+    });
+    const m = /Audio: (\w+)[^\n]*?, (\d+) Hz([^\n]*)/.exec(stderr);
+    // The stream's own bitrate; for an audio-only file the overall one is close enough.
+    const kbps = /, (\d+) kb\/s/.exec(m?.[3] ?? '')?.[1] ?? /bitrate: (\d+) kb\/s/.exec(stderr)?.[1];
+    const audio = m ? { codec: m[1], kbps: kbps ? Number(kbps) : null, sampleRate: Number(m[2]) } : null;
+    this.#probes.set(key, audio);
+    if (this.#probes.size > 256) this.#probes.delete(this.#probes.keys().next().value);
+    return audio;
   }
 
   async #handle(req, res) {

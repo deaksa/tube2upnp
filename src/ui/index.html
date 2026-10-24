@@ -366,6 +366,7 @@ function speakerRow(r, app) {
       np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
         'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
       Array.from({ length: 40 }, () => h('i'))), h('span', { class: 'time', 'data-time': r.id })) : null,
+      np?.quality ? h('p', { class: 'next', title: qualityTitle(np.quality) }, qualityText(np.quality)) : null,
       r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null,
       r.sponsorblock?.segments.length ? h('p', { class: 'next' }, 'SponsorBlock: ' + r.sponsorblock.segments.length
         + (r.sponsorblock.segments.length === 1 ? ' segment' : ' segments') + ' marked, ' + r.sponsorblock.skipped + ' skipped') : null));
@@ -428,6 +429,21 @@ function iconImg(r) {
 function devicePage(r) {
   if (!r.presentationURL) return null;
   return [' · ', h('a', { href: r.presentationURL, target: '_blank', rel: 'noopener noreferrer' }, 'Device\u00a0page\u00a0↗')];
+}
+
+/** "AAC 258 kbps · 44.1 kHz · high quality", or what we turn it into: "MP3 192 kbps, from AAC 130 kbps". */
+function qualityText(q) {
+  const src = [q.codec, q.kbps ? q.kbps + '\u00a0kbps' : null].filter(Boolean).join(' ');
+  const rate = q.sampleRate ? (q.sampleRate / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + '\u00a0kHz' : null;
+  const out = q.output === 'mp3' ? 'MP3' + (q.outputKbps ? ' ' + q.outputKbps + '\u00a0kbps' : '') + ', from ' + src
+    : q.output === 'flac' ? 'FLAC, from ' + src : src;
+  return [out, rate, q.high ? 'high quality' : null].filter(Boolean).join(' · ');
+}
+
+function qualityTitle(q) {
+  return (q.high ? 'YouTube\u2019s high (Premium) audio tier. '
+    : 'YouTube\u2019s standard audio. For 256 kbps, sign in with a Premium account (cookies, see README). ')
+    + (q.youtubeFormat ? 'YouTube format ' + q.youtubeFormat + '.' : 'As stored in the cache.');
 }
 
 function externalText(ext) {
@@ -713,7 +729,7 @@ async function refreshHistory({ append = false } = {}) {
     const recentList = hist.plays.length
       ? h('ul', { class: 'hlist' }, hist.plays.map((p) => h('li', { class: 'hrow' }, thumb(p.thumbnail),
         h('span', { class: 'what' }, trackLink(p), h('span', { class: 's' }, [p.artist,
-          hist.speaker ? null : p.speakerName, p.senders.length ? 'by ' + p.senders.join(', ') : null].filter(Boolean).join(' · ') || ' ')),
+          hist.speaker ? null : p.speakerName, p.senders.length ? 'by ' + p.senders.join(', ') : null, p.quality].filter(Boolean).join(' · ') || ' ')),
         h('span', { class: 'n muted', title: new Date(p.at).toLocaleString() + (p.format ? ' · ' + p.format : '') }, ago(p.at)))))
       : h('p', { class: 'muted' }, 'Nothing played yet.');
 

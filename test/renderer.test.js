@@ -878,3 +878,19 @@ test('unplayable: a new cast during the pause before skipping wins', async (t) =
   assert.equal(nexts, 0);
   assert.equal(r.nowPlaying.videoId, B);
 });
+
+test('now playing shows the stream quality; the history records it', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, records } = withHistory(fake, { historyMinPlayS: 0 });
+  const resolve = r.resolver.resolve;
+  r.resolver.resolve = async (id) => ({ ...(await resolve(id)), acodec: 'mp4a.40.2', abr: 258, asr: 44100, formatId: '141' });
+  await r.init();
+  await r.doPlay({ id: A }, 0);
+  assert.deepEqual(r.statusInfo().nowPlaying.quality, {
+    codec: 'AAC', kbps: 258, sampleRate: 44100, youtubeFormat: '141', high: true, output: 'direct', outputKbps: null,
+  });
+  await until(() => records.length > 0, 2000);
+  assert.equal(records[0].quality, 'AAC 258 kbps');
+  await r.destroy();
+});
