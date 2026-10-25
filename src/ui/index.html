@@ -171,10 +171,11 @@
   .tb.main { width: 3.8rem; height: 3.8rem; background: #2a2418; }
   .tb:hover, .vrow button:hover { border-color: #6b5631; }
   .tb:disabled { opacity: .5; cursor: progress; }
-  .vrow { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem 2.8rem; gap: .5rem; align-items: center; margin-top: .7rem; }
+  .vrow { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem minmax(2.8rem, auto); gap: .5rem; align-items: center; margin-top: .7rem; }
   .vrow button { width: 2.4rem; height: 2.4rem; font-size: 1.35rem; line-height: 1; touch-action: manipulation; user-select: none; }
   .vrow input[type=range] { width: 100%; accent-color: var(--vfd); min-width: 0; }
-  .vrow .pct { font-size: .85rem; text-align: right; color: var(--vfd-text); opacity: .9; }
+  .vrow .pct { font-size: .85rem; text-align: right; color: var(--vfd-text); opacity: .9; line-height: 1.2; }
+  .vrow .pct small { display: block; font-size: .7rem; opacity: .8; white-space: nowrap; }
   @media (min-width: 52rem) {
     .playctl { display: flex; align-items: center; gap: 1.5rem; }
     .playctl .transport { justify-content: flex-start; gap: .6rem; }
@@ -414,12 +415,18 @@ let openMenu = null; // id of the speaker whose "⋯" menu is open
 const holdRefresh = (ms = 1500) => { holdRefreshUntil = Math.max(holdRefreshUntil, Date.now() + ms); };
 const refreshHeld = () => Date.now() < holdRefreshUntil || openMenu != null;
 
+let volumeRefresh;
 async function control(r, action, value) {
   try {
     await api('/api/renderers/' + encodeURIComponent(r.id) + '/control', { method: 'POST', body: JSON.stringify({ action, value }) });
   } catch (err) { toast(err.message); }
-  // Volume: the slider may still be in use (held "+"), so let the next periodic refresh show it.
-  if (action === 'volume') { holdRefresh(); return; }
+  // Volume: the slider may still be in use (held "+"). Show the new dB once it's let go.
+  if (action === 'volume') {
+    holdRefresh();
+    clearTimeout(volumeRefresh);
+    volumeRefresh = setTimeout(() => { if (!refreshHeld()) refreshSpeakers(); }, 1600);
+    return;
+  }
   holdRefreshUntil = 0;
   refreshSpeakers();
 }
@@ -430,7 +437,8 @@ function transport(r) {
   const btn = (key, label, name, action, main) => h('button', { class: 'tb' + (main ? ' main' : ''), 'data-key': key + '-' + r.id,
     'aria-label': label, title: label, onclick: (e) => { e.currentTarget.disabled = true; control(r, action); } }, icon(name));
   const level = r.volumeControl ?? r.volume?.level ?? 0;
-  const pct = h('span', { class: 'pct' }, level + '%');
+  const pctText = h('span', {}, level + '%');
+  const pct = h('span', { class: 'pct' }, pctText, r.volume?.db != null ? h('small', {}, '(' + fmtDb(r.volume.db) + ')') : null);
   let timer;
   const send = (now) => {
     clearTimeout(timer);
@@ -441,12 +449,12 @@ function transport(r) {
   const slider = h('input', { type: 'range', min: 0, max: 100, step: 1, value: level, 'data-key': 'vol-' + r.id,
     'aria-label': 'Volume of ' + (r.friendlyName || r.name),
     onpointerdown: () => holdRefresh(60000),
-    oninput: () => { pct.textContent = slider.value + '%'; send(false); },
+    oninput: () => { pctText.textContent = slider.value + '%'; send(false); },
     onchange: () => send(true) });
   // The slider is hard to hit exactly on a phone: - and + step 2%, and repeat while held.
   const step = (delta) => {
     slider.value = Math.max(0, Math.min(100, Number(slider.value) + delta));
-    pct.textContent = slider.value + '%';
+    pctText.textContent = slider.value + '%';
     send(false);
   };
   const stepper = (delta, label, text) => {
@@ -532,6 +540,7 @@ document.addEventListener('keydown', (e) => {
 
 function speakerRow(r, app) {
   const np = r.nowPlaying;
+  const hasTransport = Boolean(np) && (r.playerStatus === 1 || r.playerStatus === 2);
   const playing = r.transport === 'PLAYING';
   const ext = !np && r.external ? r.external : null; // busy with something that isn't us
   const ledClass = r.lastError ? 'err' : ext ? 'warn' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
@@ -549,7 +558,7 @@ function speakerRow(r, app) {
       np ? h('div', { class: 'meter' }, seekable(h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
         'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
       Array.from({ length: 40 }, () => h('i'))), r), h('span', { class: 'time', 'data-time': r.id })) : null,
-      np && (r.playerStatus === 1 || r.playerStatus === 2) ? transport(r) : null,
+      hasTransport ? transport(r) : null,
       np?.quality ? h('p', { class: 'next', title: qualityTitle(np.quality) }, qualityText(np.quality)) : null,
       r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null,
       r.sponsorblock?.segments.length ? h('p', { class: 'next' }, 'SponsorBlock: ' + r.sponsorblock.segments.length
@@ -588,7 +597,7 @@ function speakerRow(r, app) {
     display,
     h('div', { class: 'controls' },
       h('p', { class: 'device', style: 'margin-top:0' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address, devicePage(r)),
-      volumeLine(r.volume),
+      hasTransport ? null : volumeLine(r.volume), // the controls show it, with dB
       ext ? h('p', { class: 'hint' }, 'Casting to it takes over from what it is playing now.') : null,
       r.senders.length ? h('p', { class: 'senders' }, 'Connected: ' + r.senders.join(', ')) : null,
       h('label', { class: 'field' }, 'Stream format', sel),
@@ -649,12 +658,15 @@ function fmtIn(s) {
   return s < 60 ? Math.max(1, Math.round(s)) + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
 }
 
+/** "−47.5 dB", as an AV receiver's display shows it. */
+const fmtDb = (db) => (db > 0 ? '+' : db < 0 ? '−' : '') + Math.abs(db).toFixed(1) + '\u00a0dB';
+
 function volumeLine(v, lastKnown = false) {
   if (!v) return null;
   const range = v.rangeKnown && (v.min !== 0 || v.max !== 100) ? ' (' + v.raw + ' of ' + v.max + ')' : '';
   return h('p', { class: 'device', title: 'Volume as reported by the speaker' },
     h('span', { class: 'vol', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.max(0, Math.min(100, v.level)) + '%' })),
-    'Volume ' + v.level + '%' + range + (v.db != null ? ' · ' + (v.db > 0 ? '+' : v.db < 0 ? '−' : '') + Math.abs(v.db).toFixed(1) + '\u00a0dB' : '')
+    'Volume ' + v.level + '%' + range + (v.db != null ? ' · ' + fmtDb(v.db) : '')
       + (v.muted ? ' · muted' : '') + (lastKnown ? ' (last known)' : ''));
 }
 
