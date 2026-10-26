@@ -413,6 +413,8 @@ function icon(name) {
 let holdRefreshUntil = 0;
 let openMenu = null; // id of the speaker whose "⋯" menu is open
 const holdRefresh = (ms = 1500) => { holdRefreshUntil = Math.max(holdRefreshUntil, Date.now() + ms); };
+// Let go of the slider or a -/+ button: refresh again shortly (the long hold covers the drag only).
+const releaseRefresh = (ms = 1500) => { holdRefreshUntil = Date.now() + ms; };
 const refreshHeld = () => Date.now() < holdRefreshUntil || openMenu != null;
 
 let volumeRefresh;
@@ -449,8 +451,10 @@ function transport(r) {
   const slider = h('input', { type: 'range', min: 0, max: 100, step: 1, value: level, 'data-key': 'vol-' + r.id,
     'aria-label': 'Volume of ' + (r.friendlyName || r.name),
     onpointerdown: () => holdRefresh(60000),
+    onpointerup: () => releaseRefresh(),
+    onpointercancel: () => releaseRefresh(),
     oninput: () => { pctText.textContent = slider.value + '%'; send(false); },
-    onchange: () => send(true) });
+    onchange: () => { releaseRefresh(); send(true); } });
   // The slider is hard to hit exactly on a phone: - and + step 2%, and repeat while held.
   const step = (delta) => {
     slider.value = Math.max(0, Math.min(100, Number(slider.value) + delta));
@@ -459,10 +463,15 @@ function transport(r) {
   };
   const stepper = (delta, label, text) => {
     let repeat;
-    const stop = () => { clearTimeout(repeat); clearInterval(repeat); };
+    let held = false;
+    const stop = () => {
+      clearTimeout(repeat); clearInterval(repeat);
+      if (held) { held = false; releaseRefresh(); }
+    };
     return h('button', { 'data-key': (delta > 0 ? 'volup-' : 'voldown-') + r.id, 'aria-label': label, title: label,
       onpointerdown: (e) => {
         e.preventDefault(); // no text selection or long-press menu while held
+        held = true;
         holdRefresh(60000);
         step(delta);
         repeat = setTimeout(() => { repeat = setInterval(() => step(delta), 150); }, 400);
