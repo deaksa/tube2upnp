@@ -85,17 +85,21 @@
   @media (max-width: 52rem) { .speaker { grid-template-columns: 1fr; } }
 
   .display {
-    display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 1rem; align-items: center;
+    display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); grid-template-areas: "cover info" "body body";
+    gap: .9rem 1rem; align-items: center; align-content: center;
     padding: 1rem 1.25rem; border-radius: .6rem; min-height: 8.5rem;
     background: radial-gradient(120% 140% at 20% 0%, #2a3134 0%, var(--glass) 60%);
     border: 1px solid var(--glass-edge); box-shadow: inset 0 2px 12px rgba(0,0,0,.55);
     color: var(--vfd-text);
   }
+  .display > .cover { grid-area: cover; }
+  .display > .info { grid-area: info; min-width: 0; }
+  .display > .info .artist { margin-bottom: 0; }
+  .display > .body { grid-area: body; min-width: 0; }
   .cover {
-    width: 6.5rem; aspect-ratio: 1; border-radius: .35rem; object-fit: cover;
+    width: 4.5rem; aspect-ratio: 1; border-radius: .35rem; object-fit: cover;
     background: #2a2f31; filter: saturate(.9);
   }
-  @media (max-width: 40rem) { .display { grid-template-columns: 4.5rem minmax(0, 1fr); } .cover { width: 4.5rem; } }
   .cover.none { display: grid; place-items: center; color: var(--vfd-dim); font-size: 2rem; }
   .title { font-size: clamp(1.3rem, 2.4vw, 1.9rem); font-weight: 600; line-height: 1.2; margin: 0;
     color: var(--vfd); text-shadow: 0 0 8px rgba(255,181,71,.35);
@@ -138,6 +142,50 @@
     vertical-align: middle; margin-right: .4rem; overflow: hidden; }
   .vol > i { display: block; height: 100%; background: var(--muted); }
   .speaker.away { opacity: .75; }
+  /* Card header: status LED, icon and name on the left, the "⋯" menu on the right */
+  .speaker { grid-template-areas: "head head" "disp ctl"; }
+  @media (max-width: 52rem) { .speaker { grid-template-areas: "head" "disp" "ctl"; } }
+  .speaker > .shead { grid-area: head; }
+  .speaker > .display { grid-area: disp; }
+  .speaker > .controls { grid-area: ctl; }
+  .shead { display: flex; align-items: center; gap: .6rem; margin: -.15rem 0 -.25rem; min-width: 0; }
+  .shead .name { font-size: 1.2rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  .menu { margin-left: auto; position: relative; flex: none; }
+  .menu > summary { list-style: none; cursor: pointer; width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid;
+    place-items: center; border: 1px solid transparent; font-size: 1.4rem; line-height: 1; color: var(--muted); }
+  .menu > summary::-webkit-details-marker { display: none; }
+  .menu > summary:hover, .menu[open] > summary { border-color: var(--plate-edge); background: var(--chassis); color: var(--ink); }
+  .menu .pop { position: absolute; right: 0; top: 2.8rem; z-index: 4; min-width: 15rem; padding: .35rem; border-radius: .7rem;
+    background: var(--plate); border: 1px solid var(--plate-edge); box-shadow: 0 10px 24px rgba(0,0,0,.35); display: grid; }
+  .menu .pop button { text-align: left; padding: .6rem .75rem; border: 0; border-radius: .45rem; background: none; cursor: pointer; }
+  .menu .pop button:hover, .menu .pop button:focus-visible { background: var(--chassis); }
+  .menu .pop .danger { color: var(--led-err); }
+  .menu .pop small { display: block; color: var(--muted); font-size: .75rem; }
+  /* Transport controls on the display, like an amplifier's front panel */
+  .ico { width: 1.25rem; height: 1.25rem; fill: currentColor; display: block; }
+  /* Phone: big buttons in the middle, the volume below. Wide screens: compact, one row. */
+  .transport { display: flex; align-items: center; justify-content: center; gap: 1.2rem; margin-top: .8rem; }
+  .tb, .vrow button { border-radius: 50%; border: 1px solid #3a3226; background: #1a1d1e; color: var(--vfd);
+    display: grid; place-items: center; cursor: pointer; box-shadow: 0 0 6px rgba(255,181,71,.15) inset; }
+  .tb { width: 3rem; height: 3rem; }
+  .tb.main { width: 3.8rem; height: 3.8rem; background: #2a2418; }
+  .tb:hover, .vrow button:hover { border-color: #6b5631; }
+  .tb:disabled { opacity: .5; cursor: progress; }
+  .vrow { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem minmax(2.8rem, auto); gap: .5rem; align-items: center; margin-top: .7rem; }
+  .vrow button { width: 2.4rem; height: 2.4rem; font-size: 1.35rem; line-height: 1; touch-action: manipulation; user-select: none; }
+  .vrow input[type=range] { width: 100%; accent-color: var(--vfd); min-width: 0; }
+  .vrow .pct { font-size: .85rem; text-align: right; color: var(--vfd-text); opacity: .9; line-height: 1.2; }
+  .vrow .pct small { display: block; font-size: .7rem; opacity: .8; white-space: nowrap; }
+  @media (min-width: 52rem) {
+    .playctl { display: flex; align-items: center; gap: 1.5rem; }
+    .playctl .transport { justify-content: flex-start; gap: .6rem; }
+    .playctl .tb { width: 2.5rem; height: 2.5rem; }
+    .playctl .tb.main { width: 3rem; height: 3rem; }
+    .playctl .vrow { flex: 1; max-width: 22rem; margin: .8rem 0 0 auto; }
+  }
+  .display .next { margin-top: .55rem; }
+  .segments.seekable { cursor: pointer; height: .75rem; }
+  .segments.seekable:focus-visible { outline-offset: 4px; }
   .dev-icon { width: 1.6rem; height: 1.6rem; object-fit: contain; border-radius: .3rem; flex: none; }
   .device a { color: inherit; }
   .ignored { max-width: 42rem; color: var(--muted); font-size: .9rem; }
@@ -348,8 +396,160 @@ function renderSpeakers(app) {
   tick();
 }
 
+const ICONS = {
+  prev: 'M6 5h2v14H6zM20 5 9 12l11 7z', play: 'M8 5v14l11-7z', pause: 'M6 5h4v14H6zm8 0h4v14h-4z',
+  next: 'M16 5h2v14h-2zM4 5l11 7L4 19z',
+  vol: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12z',
+};
+function icon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('class', 'ico'); svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', ICONS[name]); svg.append(path);
+  return svg;
+}
+
+// The periodic refresh rebuilds the cards; it waits while a slider is dragged or a menu is open.
+let holdRefreshUntil = 0;
+let openMenu = null; // id of the speaker whose "⋯" menu is open
+const holdRefresh = (ms = 1500) => { holdRefreshUntil = Math.max(holdRefreshUntil, Date.now() + ms); };
+// Let go of the slider or a -/+ button: refresh again shortly (the long hold covers the drag only).
+const releaseRefresh = (ms = 1500) => { holdRefreshUntil = Date.now() + ms; };
+const refreshHeld = () => Date.now() < holdRefreshUntil || openMenu != null;
+
+let volumeRefresh;
+async function control(r, action, value) {
+  try {
+    await api('/api/renderers/' + encodeURIComponent(r.id) + '/control', { method: 'POST', body: JSON.stringify({ action, value }) });
+  } catch (err) { toast(err.message); }
+  // Volume: the slider may still be in use (held "+"). Show the new dB once it's let go.
+  if (action === 'volume') {
+    holdRefresh();
+    clearTimeout(volumeRefresh);
+    volumeRefresh = setTimeout(() => { if (!refreshHeld()) refreshSpeakers(); }, 1600);
+    return;
+  }
+  holdRefreshUntil = 0;
+  refreshSpeakers();
+}
+
+/** Previous, play/pause and next on the display, and the volume: only for our own track. */
+function transport(r) {
+  const playing = r.playerStatus === 1;
+  const btn = (key, label, name, action, main) => h('button', { class: 'tb' + (main ? ' main' : ''), 'data-key': key + '-' + r.id,
+    'aria-label': label, title: label, onclick: (e) => { e.currentTarget.disabled = true; control(r, action); } }, icon(name));
+  const level = r.volumeControl ?? r.volume?.level ?? 0;
+  const pctText = h('span', {}, level + '%');
+  const pct = h('span', { class: 'pct' }, pctText, r.volume?.db != null ? h('small', {}, '(' + fmtDb(r.volume.db) + ')') : null);
+  let timer;
+  const send = (now) => {
+    clearTimeout(timer);
+    holdRefresh();
+    if (now) control(r, 'volume', Number(slider.value));
+    else timer = setTimeout(() => control(r, 'volume', Number(slider.value)), 250);
+  };
+  const slider = h('input', { type: 'range', min: 0, max: 100, step: 1, value: level, 'data-key': 'vol-' + r.id,
+    'aria-label': 'Volume of ' + (r.friendlyName || r.name),
+    onpointerdown: () => holdRefresh(60000),
+    onpointerup: () => releaseRefresh(),
+    onpointercancel: () => releaseRefresh(),
+    oninput: () => { pctText.textContent = slider.value + '%'; send(false); },
+    onchange: () => { releaseRefresh(); send(true); } });
+  // The slider is hard to hit exactly on a phone: - and + step 2%, and repeat while held.
+  const step = (delta) => {
+    slider.value = Math.max(0, Math.min(100, Number(slider.value) + delta));
+    pctText.textContent = slider.value + '%';
+    send(false);
+  };
+  const stepper = (delta, label, text) => {
+    let repeat;
+    let held = false;
+    const stop = () => {
+      clearTimeout(repeat); clearInterval(repeat);
+      if (held) { held = false; releaseRefresh(); }
+    };
+    return h('button', { 'data-key': (delta > 0 ? 'volup-' : 'voldown-') + r.id, 'aria-label': label, title: label,
+      onpointerdown: (e) => {
+        e.preventDefault(); // no text selection or long-press menu while held
+        held = true;
+        holdRefresh(60000);
+        step(delta);
+        repeat = setTimeout(() => { repeat = setInterval(() => step(delta), 150); }, 400);
+      },
+      onpointerup: stop, onpointerleave: stop, onpointercancel: stop,
+      onclick: (e) => { if (e.detail === 0) step(delta); }, // keyboard (pointer clicks were handled on pointerdown)
+    }, text);
+  };
+  return h('div', { class: 'playctl' },
+    h('div', { class: 'transport' },
+      btn('prev', 'Previous track (or back to the start)', 'prev', 'previous'),
+      btn('playpause', playing ? 'Pause' : 'Play', playing ? 'pause' : 'play', playing ? 'pause' : 'resume', true),
+      btn('next', 'Next track', 'next', 'next')),
+    h('div', { class: 'vrow' }, stepper(-2, 'Volume down', '−'), slider, stepper(2, 'Volume up', '+'), pct));
+}
+
+/** Tap or click the progress meter to seek there; arrow keys jump 10 s. */
+function seekable(meter, r) {
+  const dur = r.position?.dur || r.nowPlaying?.duration || 0;
+  if (!dur) return meter;
+  meter.classList.add('seekable');
+  meter.setAttribute('role', 'slider');
+  meter.setAttribute('tabindex', '0');
+  meter.setAttribute('aria-label', 'Playback position - click to seek');
+  meter.addEventListener('click', (e) => {
+    const box = meter.getBoundingClientRect();
+    control(r, 'seek', Math.round(((e.clientX - box.left) / box.width) * dur));
+  });
+  meter.addEventListener('keydown', (e) => {
+    const step = { ArrowRight: 10, ArrowLeft: -10 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    control(r, 'seek', Math.max(0, Math.round(Number(meter.getAttribute('aria-valuenow') || 0) + step)));
+  });
+  return meter;
+}
+
+/** Status LED, icon and name, with the less used actions in a "⋯" menu. */
+function cardHead(r, ledClass, items) {
+  const name = r.friendlyName || r.name;
+  const menu = items.length ? h('details', { class: 'menu', open: openMenu === r.id,
+    ontoggle: (e) => {
+      if (!e.target.open) { if (openMenu === r.id) openMenu = null; return; }
+      openMenu = r.id;
+      document.querySelectorAll('details.menu[open]').forEach((d) => { if (d !== e.target) d.open = false; });
+    } },
+  h('summary', { 'aria-label': 'More actions for ' + name, title: 'More actions', 'data-key': 'menu-' + r.id }, '⋯'),
+  h('div', { class: 'pop', role: 'menu' }, items.map(([label, hint, onclick, danger]) => h('button', {
+    role: 'menuitem', class: danger ? 'danger' : null, onclick: (e) => { openMenu = null; e.target.closest('details').open = false; onclick(); },
+  }, label, h('small', {}, hint))))) : null;
+  return h('div', { class: 'shead' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), iconImg(r),
+    h('h2', { class: 'name', title: name }, name), menu);
+}
+
+async function speakerPost(r, action, question) {
+  if (question && !confirm(question)) return;
+  try { await api('/api/renderers/' + encodeURIComponent(r.id) + '/' + action, { method: 'POST' }); }
+  catch (err) { toast(err.message); }
+  refreshSpeakers();
+}
+
+// A click outside an open menu, or Escape, closes it.
+document.addEventListener('click', (e) => {
+  if (openMenu != null && !e.target.closest('details.menu')) {
+    document.querySelectorAll('details.menu[open]').forEach((d) => { d.open = false; });
+    openMenu = null;
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || openMenu == null) return;
+  const d = document.querySelector('details.menu[open]');
+  if (d) { d.open = false; d.querySelector('summary').focus(); }
+  openMenu = null;
+});
+
 function speakerRow(r, app) {
   const np = r.nowPlaying;
+  const hasTransport = Boolean(np) && (r.playerStatus === 1 || r.playerStatus === 2);
   const playing = r.transport === 'PLAYING';
   const ext = !np && r.external ? r.external : null; // busy with something that isn't us
   const ledClass = r.lastError ? 'err' : ext ? 'warn' : playing ? 'on' : r.transport === 'PAUSED_PLAYBACK' ? 'warn' : '';
@@ -358,18 +558,20 @@ function speakerRow(r, app) {
       : ext?.art != null ? h('img', { class: 'cover', alt: '', src: '/api/renderers/' + encodeURIComponent(r.id) + '/art?v=' + encodeURIComponent(ext.art)
         + (token ? '&token=' + encodeURIComponent(token) : '') })
       : h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
-    h('div', {},
+    h('div', { class: 'info' },
       h('p', { class: 'title' }, np ? np.title : ext ? (ext.state === 'PLAYING' ? 'Playing another source' : 'Paused on another source')
         : r.power === 'standby' ? 'Standby' : (r.senders.length ? 'Connected, nothing playing' : 'Ready to cast')),
       h('p', { class: 'artist' }, np ? np.artist : ext ? externalText(ext)
-        : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app')),
-      np ? h('div', { class: 'meter' }, h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
+        : (r.senders.length ? r.senders.join(', ') : 'Pick ' + r.name + ' in the YouTube app'))),
+    np || r.upNext ? h('div', { class: 'body' },
+      np ? h('div', { class: 'meter' }, seekable(h('div', { class: 'segments', 'data-meter': r.id, role: 'progressbar',
         'aria-label': 'Playback position', 'aria-valuemin': 0, 'aria-valuemax': Math.round(r.position?.dur || 0) },
-      Array.from({ length: 40 }, () => h('i'))), h('span', { class: 'time', 'data-time': r.id })) : null,
+      Array.from({ length: 40 }, () => h('i'))), r), h('span', { class: 'time', 'data-time': r.id })) : null,
+      hasTransport ? transport(r) : null,
       np?.quality ? h('p', { class: 'next', title: qualityTitle(np.quality) }, qualityText(np.quality)) : null,
       r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null,
       r.sponsorblock?.segments.length ? h('p', { class: 'next' }, 'SponsorBlock: ' + r.sponsorblock.segments.length
-        + (r.sponsorblock.segments.length === 1 ? ' segment' : ' segments') + ' marked, ' + r.sponsorblock.skipped + ' skipped') : null));
+        + (r.sponsorblock.segments.length === 1 ? ' segment' : ' segments') + ' marked, ' + r.sponsorblock.skipped + ' skipped') : null) : null);
 
   const sel = h('select', { 'data-key': 'fmt-' + r.id, onchange: async (e) => {
     const v = e.target.value; e.target.disabled = true;
@@ -389,12 +591,22 @@ function speakerRow(r, app) {
   if (r.format.mode === 'auto') fmtHint.push(r.format.learned ? 'Detected: ' + FORMAT_NAMES[r.format.learned] + '.' : 'Not detected yet.');
 
   const code = pairCodes[r.id];
+  const name = r.friendlyName || r.name;
+  const getCode = async () => {
+    try { pairCodes[r.id] = (await api('/api/renderers/' + encodeURIComponent(r.id) + '/pair', { method: 'POST' })).code; }
+    catch (err) { toast(err.message); }
+    refreshSpeakers();
+  };
   return h('article', { class: 'speaker', 'aria-label': r.name },
+    cardHead(r, ledClass, [
+      [code ? 'New TV code' : 'Get TV code', 'Link the YouTube app without discovery', getCode],
+      ['Ignore', 'Leave the cast menu and free its port', () => speakerPost(r, 'ignore', 'Ignore ' + name + '? Its receiver stops and it '
+        + 'leaves the cast menu until you allow it again. Its port and saved settings are freed.'), true],
+    ]),
     display,
     h('div', { class: 'controls' },
-      h('h2', { class: 'name' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), iconImg(r), r.friendlyName || r.name),
-      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address, devicePage(r)),
-      volumeLine(r.volume),
+      h('p', { class: 'device', style: 'margin-top:0' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address, devicePage(r)),
+      hasTransport ? null : volumeLine(r.volume), // the controls show it, with dB
       ext ? h('p', { class: 'hint' }, 'Casting to it takes over from what it is playing now.') : null,
       r.senders.length ? h('p', { class: 'senders' }, 'Connected: ' + r.senders.join(', ')) : null,
       h('label', { class: 'field' }, 'Stream format', sel),
@@ -404,16 +616,8 @@ function speakerRow(r, app) {
             toast('Forgot the detected format for ' + r.friendlyName); } catch (err) { toast(err.message); }
           refreshSpeakers(); } }, 'Detect again') : null) : null,
       r.lastError ? h('p', { class: 'error' }, r.lastError) : null,
-      h('div', { class: 'row' },
-        h('button', { class: 'btn', 'data-key': 'pair-' + r.id, onclick: async (e) => {
-          e.target.disabled = true; e.target.textContent = 'Getting code…';
-          try { pairCodes[r.id] = (await api('/api/renderers/' + encodeURIComponent(r.id) + '/pair', { method: 'POST' })).code; }
-          catch (err) { toast(err.message); }
-          refreshSpeakers();
-        } }, code ? 'New TV code' : 'Get TV code'),
-        code ? h('span', { class: 'code', 'aria-label': 'TV code' }, code.replace(/(\d{3})(?=\d)/g, '$1 ')) : null,
-        speakerAction(r, 'ignore', 'Ignore', 'Ignore ' + (r.friendlyName || r.name) + '? Its receiver stops and it '
-          + 'leaves the cast menu until you allow it again. Its port and saved settings are freed.')),
+      code ? h('div', { class: 'row' }, h('span', { class: 'muted' }, 'TV code'),
+        h('span', { class: 'code', 'aria-label': 'TV code' }, code.replace(/(\d{3})(?=\d)/g, '$1 '))) : null,
       code ? h('p', { class: 'hint' }, 'In the YouTube app: Settings, Watch on TV, Enter TV code.') : null));
 }
 
@@ -463,12 +667,15 @@ function fmtIn(s) {
   return s < 60 ? Math.max(1, Math.round(s)) + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
 }
 
+/** "−47.5 dB", as an AV receiver's display shows it. */
+const fmtDb = (db) => (db > 0 ? '+' : db < 0 ? '−' : '') + Math.abs(db).toFixed(1) + '\u00a0dB';
+
 function volumeLine(v, lastKnown = false) {
   if (!v) return null;
   const range = v.rangeKnown && (v.min !== 0 || v.max !== 100) ? ' (' + v.raw + ' of ' + v.max + ')' : '';
   return h('p', { class: 'device', title: 'Volume as reported by the speaker' },
     h('span', { class: 'vol', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.max(0, Math.min(100, v.level)) + '%' })),
-    'Volume ' + v.level + '%' + range + (v.db != null ? ' · ' + (v.db > 0 ? '+' : v.db < 0 ? '−' : '') + Math.abs(v.db).toFixed(1) + '\u00a0dB' : '')
+    'Volume ' + v.level + '%' + range + (v.db != null ? ' · ' + fmtDb(v.db) : '')
       + (v.muted ? ' · muted' : '') + (lastKnown ? ' (last known)' : ''));
 }
 
@@ -489,20 +696,20 @@ function awayRow(r) {
   const detail = r.state === 'offline' ? 'Last seen ' + fmtAgo(r.lastSeenS) + ' · not in the cast menu'
     : r.state === 'error' ? 'Receiver did not start' + (r.retryInS ? ' · next try in ' + fmtIn(r.retryInS) : '')
       : 'Setting up its receiver…';
+  const menu = r.state === 'starting' ? [] : [
+    ['Remove', 'Forget it and free its port', () => speakerPost(r, 'remove', 'Remove ' + name + '? Its port and saved settings '
+      + 'are freed. If it comes back, it is set up again as a new speaker.'), true],
+    ['Ignore', 'Never set it up again', () => speakerPost(r, 'ignore', 'Ignore ' + name + '? It is not set up again until you allow it.'), true],
+  ];
   return h('article', { class: 'speaker away', 'aria-label': name },
+    cardHead(r, r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : '', menu),
     h('div', { class: 'display idle' }, h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
-      h('div', {}, h('p', { class: 'title' }, STATE_TEXT[r.state] || r.state), h('p', { class: 'artist' }, detail))),
+      h('div', { class: 'info' }, h('p', { class: 'title' }, STATE_TEXT[r.state] || r.state), h('p', { class: 'artist' }, detail))),
     h('div', { class: 'controls' },
-      h('h2', { class: 'name' }, h('span', { class: 'led ' + (r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : ''),
-        'aria-hidden': 'true' }), iconImg(r), name),
-      h('p', { class: 'device' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + (r.address ? ' at ' + r.address : '')
+      h('p', { class: 'device', style: 'margin-top:0' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + (r.address ? ' at ' + r.address : '')
         + (r.dialPort ? ' · port ' + r.dialPort + ' kept for it' : ''), devicePage(r)),
       volumeLine(r.volume, true),
-      r.error ? h('p', { class: 'error' }, r.error) : null,
-      r.state === 'starting' ? null : h('div', { class: 'row' },
-        speakerAction(r, 'remove', 'Remove', 'Remove ' + name + '? Its port and saved settings are freed. '
-          + 'If it comes back, it is set up again as a new speaker.'),
-        speakerAction(r, 'ignore', 'Ignore', 'Ignore ' + name + '? It is not set up again until you allow it.'))));
+      r.error ? h('p', { class: 'error' }, r.error) : null));
 }
 
 function ignoredList(list) {
@@ -533,7 +740,7 @@ function tick() {
   }
 }
 setInterval(() => { if (current === 'speakers' && !document.hidden) tick(); }, 1000);
-setInterval(() => { if (current === 'speakers' && !document.hidden && !document.activeElement?.matches('select')) refreshSpeakers(); }, 4000);
+setInterval(() => { if (current === 'speakers' && !document.hidden && !document.activeElement?.matches('select') && !refreshHeld()) refreshSpeakers(); }, 4000);
 
 /* ----------------------------------------------------------------- logs */
 const logEl = document.getElementById('log');
