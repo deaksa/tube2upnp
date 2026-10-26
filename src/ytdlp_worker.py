@@ -5,7 +5,7 @@
 #
 # Protocol: one JSON request per line on stdin, one JSON reply per line on file descriptor 3.
 # yt-dlp itself may print to stdout/stderr; fd 3 is ours alone, so nothing can corrupt replies.
-#   {"id": 1, "op": "ping"}                                  -> {"id": 1, "ok": true, "result": "<version>"}
+#   {"id": 1, "op": "ping"}  -> {"id": 1, "ok": true, "result": {"version": "...", "fastJsc": bool}}
 #   {"id": 2, "op": "resolve", "args": [...], "url": "..."}  -> result: the info JSON (as --dump-json prints it)
 #   {"id": 3, "op": "download", "args": [...], "infoFile": "..."} -> result: null
 #   on failure: {"id": n, "ok": false, "error": "<yt-dlp's message>"}
@@ -18,6 +18,13 @@ import sys
 
 import yt_dlp
 
+import ytdlp_jsc  # next to this script
+
+try:
+    fast_jsc = ytdlp_jsc.install()
+except Exception as err:  # an optimisation: never a reason not to start
+    print(f'preprocessed player cache unavailable: {err}', file=sys.stderr, flush=True)
+    fast_jsc = False
 replies = os.fdopen(3, 'w', buffering=1, encoding='utf-8')
 
 
@@ -54,7 +61,7 @@ resolvers = {}
 def handle(req):
     op = req.get('op')
     if op == 'ping':
-        return yt_dlp.version.__version__
+        return {'version': yt_dlp.version.__version__, 'fastJsc': fast_jsc}
     if op == 'resolve':
         key = json.dumps(req['args'])
         ydl = resolvers.get(key)

@@ -107,3 +107,24 @@ test('downloads go through the worker and keep the 403 flag', { skip }, async (t
     (err) => err.forbidden === true && /yt-dlp download failed for forbiddenxx: .*403/.test(err.message),
   );
 });
+
+test('preprocessed YouTube players are kept in memory, the last two', { skip }, () => {
+  const out = execFileSync('python3', ['-c', `
+import sys; sys.path.insert(0, ${JSON.stringify(fileURLToPath(new URL('../src', import.meta.url)))})
+import ytdlp_jsc
+from yt_dlp.cache import Cache
+from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+print(ytdlp_jsc.install(log=lambda m: None), EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE)
+c = Cache()
+for p in ('a', 'b', 'c'):
+    c.store('challenge-solver', 'player:' + p, 'pre-' + p)
+c.store('challenge-solver', 'lib', 'script')
+print([c.load('challenge-solver', 'player:' + p) for p in 'abc'], c.load('challenge-solver', 'lib'))
+print(sorted(k for _, k in Cache.disk))
+`], { encoding: 'utf8' });
+  assert.deepEqual(out.trim().split('\n'), [
+    'True True',
+    "[None, 'pre-b', 'pre-c'] script",
+    "['lib']", // players never reach the disk cache
+  ]);
+});

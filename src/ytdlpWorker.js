@@ -126,8 +126,9 @@ export class YtdlpWorkers {
     this.#ready ??= (async () => {
       try {
         const w = this.#spawn();
-        const version = await w.request({ op: 'ping' }, START_TIMEOUT_MS);
-        this.log.info(`yt-dlp ${version} stays loaded between lookups (up to ${this.size} process${this.size > 1 ? 'es' : ''})`);
+        const { version, fastJsc } = await w.request({ op: 'ping' }, START_TIMEOUT_MS);
+        this.log.info(`yt-dlp ${version} stays loaded between lookups (up to ${this.size} process${this.size > 1 ? 'es' : ''})`
+          + (fastJsc ? ', reusing the preprocessed YouTube player for JS challenges' : ''));
         return true;
       } catch (err) {
         this.log.info(`yt-dlp runs once per lookup (could not keep it loaded with ${this.python}: ${err.message})`);
