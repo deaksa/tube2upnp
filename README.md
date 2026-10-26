@@ -158,7 +158,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
 | `CACHE_MB` | `512` | Size cap for the disk cache (downloaded tracks and built `mp4`/`flac` files). When it's exceeded, the least recently played files are removed first. Files being downloaded or played, and the track just built, are never removed, even if that track alone is bigger than the cap. |
-| `CACHE_DIR` | `DATA_DIR/cache` | Where that cache lives. It's kept across restarts (in Docker, inside the data volume). Use **Clear cache** on the status page after changing `YTDLP_FORMAT`. |
+| `CACHE_DIR` | `DATA_DIR/cache` | Where that cache lives. It's kept across restarts (in Docker, inside the data volume). With `mp4`/`flac`, a track that's still in it starts without asking YouTube again (its title, artist and cover are kept next to the audio). Use **Clear cache** on the status page after changing `YTDLP_FORMAT`. |
 | `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
 | `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |
@@ -167,6 +167,8 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `YTDLP_UPDATE_HOURS` | `24` | Self-update interval. `0` disables it. |
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
+| `YTDLP_WORKERS` | `2` | yt-dlp processes kept loaded between lookups and downloads, so a track doesn't wait for Python and yt-dlp to start, and YouTube's player code is parsed once per player version instead of for every track (its JS challenges take a few hundred ms instead of seconds). At start (and after a yt-dlp update) each one looks up a video once, so the first track you cast doesn't pay for loading YouTube's player. Each takes about 60 MB of RAM; the second starts only when two lookups overlap. `0` starts yt-dlp for every lookup. If the worker can't start (no Python that can `import yt_dlp`, e.g. the standalone yt-dlp binary), that happens automatically. |
+| `YTDLP_PYTHON` | next to `YTDLP_PATH`, else `python3` | The Python that runs those processes. It must be able to import yt-dlp; by default it's the one in yt-dlp's venv (the Docker image's `/opt/yt-dlp`, or pipx's). |
 | `DATA_DIR` | `./data` (`/data` in Docker) | Remembered speakers and their ports, per-renderer screen IDs (so phones remember the receivers), settings, history and the cache |
 | `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |

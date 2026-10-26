@@ -68,6 +68,10 @@ export const config = Object.freeze({
   ytdlpJsRuntime: str('YTDLP_JS_RUNTIME', 'node'),
   ytdlpExtraArgs: str('YTDLP_EXTRA_ARGS', '').split(' ').filter(Boolean),
   ytdlpTimeoutMs: int('YTDLP_TIMEOUT_MS', 45000),
+  // yt-dlp processes kept loaded between lookups and downloads (0 = start yt-dlp every time),
+  // and the Python that runs them (default: the one next to YTDLP_PATH, else python3).
+  ytdlpWorkers: Math.max(0, int('YTDLP_WORKERS', 2)),
+  ytdlpPython: str('YTDLP_PYTHON', ''),
   // Update yt-dlp every N hours (0 = never). YouTube breaks old yt-dlp versions regularly.
   ytdlpUpdateHours: int('YTDLP_UPDATE_HOURS', 24),
   ytdlpUpdateCmd: str('YTDLP_UPDATE_CMD', ''),

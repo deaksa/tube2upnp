@@ -342,14 +342,14 @@ export class Renderer extends Player {
 
   /** Resolve, build (mp4/flac) and register a track; returns everything needed to play it. */
   async #prepareItem(video, position, format = null, offsetStart = false) {
-    const info = await this.resolver.resolve(video.id);
+    const info = await this.#trackInfo(video.id, format);
     format ??= this.#chooseFormat(info.mime);
     const mime = mimeOf(format, info.mime);
     // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
     const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
     const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false, streamPath: null };
     const entry = {
-      videoId: video.id, format, ext: info.ext, startAt,
+      videoId: video.id, format, ext: info.ext, startAt, info,
       onRequest: () => {
         if (!current.fetched) this.log.info(`Renderer started fetching the stream (${format})`);
         current.fetched = true;
@@ -372,6 +372,20 @@ export class Renderer extends Player {
       isVideo: mime.startsWith('video/'),
     });
     return { current, info, format, mime, url, streamPath, metadata, quality };
+  }
+
+  /**
+   * The track's details: from the cache when its audio is there and will be played from a
+   * file (mp4/flac), which saves a yt-dlp lookup of a few seconds; else from yt-dlp.
+   */
+  async #trackInfo(videoId, format) {
+    const cached = await this.media.cachedInfo?.(videoId).catch(() => null);
+    if (cached && FILE_FORMATS.includes(format ?? this.#chooseFormat(cached.mime))) {
+      this.log.info(`"${cached.title}" is in the cache - starting it without a lookup`);
+      stats.inc('resolve.skippedCached');
+      return cached;
+    }
+    return this.resolver.resolve(videoId);
   }
 
   /** Make `item` the current track (after we loaded it, or the renderer switched to it). */
