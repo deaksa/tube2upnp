@@ -100,7 +100,7 @@ export class Renderer extends Player {
   /** Title of the prepared next track, for the status page. */
   get upNext() {
     const q = this.#queued;
-    return q ? { title: q.item.info.title, gapless: q.sentToRenderer } : null;
+    return q ? { title: q.item.info.title, artist: q.item.info.artist || null, gapless: q.sentToRenderer } : null;
   }
 
   get connectedSenders() {

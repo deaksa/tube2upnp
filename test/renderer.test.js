@@ -226,6 +226,7 @@ test('gapless: next track is prepared, queued with SetNextAVTransportURI, and ad
   assert.ok(setNext, 'next track handed to renderer');
   assert.equal(registered[1].videoId, B);
   assert.match(fake.state.nextUri, new RegExp(`/stream/0{31}2\\.m4a$`));
+  assert.deepEqual(r.upNext, { title: `Song & Dance – Pitypang ő ű ${B}`, artist: 'Band', gapless: true }, 'for the status page');
 
   // Renderer finishes A and plays on into B by itself. What yt-cast-receiver does:
   r.next = async () => r.doPlay({ id: B }, 0);
