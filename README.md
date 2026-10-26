@@ -158,7 +158,7 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `NAME_TEMPLATE` | `🔊 {name}` | Cast menu name. Placeholders: `{name}`, `{manufacturer}`, `{model}` |
 | `OUTPUT_FORMAT` | `auto` | `auto`, `direct`, `mp4`, `adts`, `flac` or `mp3` (see [Stream formats](#stream-formats)). The older `TRANSCODE=always`/`never` still works and means `mp3`/`direct`. |
 | `CACHE_MB` | `512` | Size cap for the disk cache (downloaded tracks and built `mp4`/`flac` files). When it's exceeded, the least recently played files are removed first. Files being downloaded or played, and the track just built, are never removed, even if that track alone is bigger than the cap. |
-| `CACHE_DIR` | `DATA_DIR/cache` | Where that cache lives. It's kept across restarts (in Docker, inside the data volume). Use **Clear cache** on the status page after changing `YTDLP_FORMAT`. |
+| `CACHE_DIR` | `DATA_DIR/cache` | Where that cache lives. It's kept across restarts (in Docker, inside the data volume). With `mp4`/`flac`, a track that's still in it starts without asking YouTube again (its title, artist and cover are kept next to the audio). Use **Clear cache** on the status page after changing `YTDLP_FORMAT`. |
 | `MP3_BITRATE` | `192k` | Bitrate for `mp3` |
 | `FLAC_BITS` | `16` | Bit depth for `flac`: `16` or `24` |
 | `YTDLP_FORMAT` | `bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best` | yt-dlp format selector |

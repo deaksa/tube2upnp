@@ -962,3 +962,23 @@ test('playback controls: "previous" restarts the track a few seconds in, or with
   assert.equal(seeks(), before + 1, 'nothing before it: restart instead of stopping');
   await r.destroy();
 });
+
+test('a track cached as a file starts without a yt-dlp lookup; streamed formats still look it up', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const entries = [];
+  const mediaServer = {
+    prepare: async () => {},
+    register: (e) => { entries.push(e); return `/stream/${String(entries.length).padStart(32, '0')}.m4a`; },
+    cachedInfo: async (id) => (id === 'cachedtrack' ? { fromCache: true, title: 'From cache', artist: 'Band', album: '', thumbnail: '', duration: 200, ext: 'm4a', mime: 'audio/mp4' } : null),
+  };
+  for (const [outputFormat, lookups] of [['mp4', []], ['direct', ['cachedtrack']]]) {
+    const { r, resolves } = setup(fake, { outputFormat }, undefined, { mediaServer });
+    await r.init();
+    assert.equal(await r.doPlay({ id: 'cachedtrack' }, 0), true);
+    assert.deepEqual(resolves, lookups, outputFormat);
+    assert.equal(r.nowPlaying.title, outputFormat === 'mp4' ? 'From cache' : 'Song & Dance – Pitypang ő ű cachedtrack');
+    await r.destroy();
+  }
+  assert.equal(entries[0].info.fromCache, true, 'the media server is told the details came from the cache');
+});

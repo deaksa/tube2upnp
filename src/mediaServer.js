@@ -22,6 +22,10 @@ const MAX_ART_SOURCE_BYTES = 5 * 1024 * 1024;
 const ART_HOSTS = /(^|\.)(ytimg\.com|ggpht\.com|googleusercontent\.com)$/;
 const ART_FEATURES = 'DLNA.ORG_PN=JPEG_SM;DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=00f00000000000000000000000000000';
 const CACHE_FILE = /\.(m4a|flac|source)$/;
+// What a track's lookup said, next to its cached audio, so a cached track starts without one.
+const META_FILE = /^([A-Za-z0-9_-]{11})\.meta\.json$/;
+const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const META_FIELDS = ['title', 'artist', 'album', 'thumbnail', 'duration', 'ext', 'mime', 'formatId', 'acodec', 'abr', 'asr'];
 const PASSTHROUGH_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
 
 export function parseRange(header, size) {
@@ -178,11 +182,67 @@ export class MediaServer {
   async prepare(entry) {
     if (!FILE_FORMATS.includes(entry.format)) return {};
     const file = await this.#remuxToFile(entry);
+    if (entry.info && !entry.info.fromCache) await this.#saveMeta(entry.videoId, entry.info);
     // The audio actually played: the source on disk may be older than the current
     // extraction (downloaded at 128 kbps before cookies were set up, say).
     const src = this.#sourcePath(entry.videoId);
     const audio = await this.probeAudio(fs.existsSync(src) ? src : entry.format === 'mp4' ? file : null);
     return { sourceAudio: audio };
+  }
+
+  /**
+   * A track's details from an earlier lookup, if its audio is still in the cache (the source,
+   * or a file built from it), else null. Lets mp4/flac start without asking YouTube again:
+   * that lookup takes seconds, the cached file is ready.
+   */
+  async cachedInfo(videoId) {
+    if (!VIDEO_ID.test(videoId)) return null;
+    let meta;
+    try {
+      meta = JSON.parse(await fsp.readFile(this.#metaPath(videoId), 'utf8'));
+    } catch {
+      return null;
+    }
+    if (typeof meta?.title !== 'string' || typeof meta.mime !== 'string') return null;
+    const names = await fsp.readdir(this.cacheDir).catch(() => []);
+    if (!names.some((f) => CACHE_FILE.test(f) && (f === `${videoId}.source` || f.startsWith(`${videoId}-`)))) return null;
+    const info = { fromCache: true };
+    for (const k of META_FIELDS) {
+      if (['string', 'number'].includes(typeof meta[k])) info[k] = meta[k];
+    }
+    info.artist ??= '';
+    info.album ??= '';
+    info.thumbnail ??= '';
+    info.duration = Number(info.duration) || 0;
+    return info;
+  }
+
+  #metaPath(videoId) {
+    return path.join(this.cacheDir, `${videoId}.meta.json`);
+  }
+
+  async #saveMeta(videoId, info) {
+    if (!VIDEO_ID.test(videoId)) return;
+    const meta = Object.fromEntries(META_FIELDS.filter((k) => info[k] != null).map((k) => [k, info[k]]));
+    const file = this.#metaPath(videoId);
+    const part = `${file}.part`; // dropped at start if we die before the rename
+    try {
+      await fsp.writeFile(part, JSON.stringify(meta), { mode: 0o600 });
+      await fsp.rename(part, file);
+    } catch (err) {
+      this.log.debug(`Could not save details of ${videoId}:`, err.message);
+      await fsp.rm(part, { force: true });
+    }
+  }
+
+  /** Details of tracks whose audio is no longer cached are of no use. */
+  async #dropOrphanMeta() {
+    const names = await fsp.readdir(this.cacheDir);
+    const ids = new Set(names.filter((f) => CACHE_FILE.test(f)).map((f) => f.slice(0, 11)));
+    for (const f of names) {
+      const m = META_FILE.exec(f);
+      if (m && !ids.has(m[1])) await fsp.rm(path.join(this.cacheDir, f), { force: true });
+    }
   }
 
   #probes = new Map(); // `${file}:${mtime}` -> { codec, kbps, sampleRate }
@@ -564,6 +624,7 @@ export class MediaServer {
       await fsp.rm(path.join(this.cacheDir, f), { force: true });
       n++;
     }
+    await this.#dropOrphanMeta();
     this.log.info(`Cache cleared (${n} file(s)${busy ? `, ${busy} in use kept` : ''})`);
     return n;
   }
@@ -601,6 +662,7 @@ export class MediaServer {
       total -= x.size;
       stats.inc('cache.evictions');
     }
+    await this.#dropOrphanMeta();
   }
 
   async #serveFile(req, res, entry) {
