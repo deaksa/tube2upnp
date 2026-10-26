@@ -6,7 +6,8 @@
 # preprocessed player instead (a few hundred ms per solve), but keeps that switched off
 # because it would store it on disk: several MB per player version, never cleaned up. In a
 # process that stays loaded it can live in memory, so we switch it on and keep the stored
-# players there (the last two versions; YouTube changes the player every few days).
+# players there: the last few versions, since YouTube hands out more than one at a time
+# (lookups alternate between them) and changes them every few days.
 #
 # yt-dlp's own code still does all the work, in its sandboxed node process, which still exits
 # after each solve (a node that stays running keeps growing: 100+ MB). Only where the
@@ -15,7 +16,7 @@
 
 import sys
 
-KEEP = 2
+KEEP = 4  # a few MB each
 
 
 def install(log=lambda msg: print(msg, file=sys.stderr, flush=True)):

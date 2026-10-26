@@ -43,6 +43,10 @@ class YoutubeDL:
         vid = url.rsplit('=', 1)[-1]
         if vid == 'unavailable':
             raise Exception('ERROR: [youtube] unavailable: Video unavailable')
+        if vid == 'ignoredxxxx':
+            # The command line's ignoreerrors: yt-dlp logs the error and returns nothing.
+            self.logger.error('ERROR: [youtube] ignoredxxxx: Video unavailable. This video is not available')
+            return None
         if vid == 'crashcrashx':
             os._exit(3)
         if vid == 'hanghanghan':

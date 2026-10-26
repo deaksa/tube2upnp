@@ -69,7 +69,10 @@ def handle(req):
             if len(resolvers) >= 4:
                 resolvers.pop(next(iter(resolvers))).close()
             ydl = resolvers[key] = make(req['args'])
+        Log.last_error = None
         info = ydl.extract_info(req['url'], download=False)
+        if info is None:  # the command line's ignoreerrors: the error only went to the logger
+            raise RuntimeError(Log.last_error or 'no video info')
         ydl.save_cookies()  # like the command line does on exit: YouTube rotates them
         return json.dumps(ydl.sanitize_info(info))
     if op == 'download':

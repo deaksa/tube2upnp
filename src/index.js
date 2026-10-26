@@ -102,9 +102,9 @@ async function main() {
   log.info('Starting Tube2U[PnP] (a fork of upnpTube)');
   await checkTools();
   stats.startSampling();
-  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'), resolver.workers);
-  // Load yt-dlp now, not when the first track is cast.
-  resolver.workers?.start();
+  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'), resolver);
+  // Load yt-dlp and YouTube's player now, not when the first track is cast.
+  resolver.warmUp().catch(() => {});
   await mediaServer.start();
   const search = () => ssdp.search(RENDERER_ST, 3);
   if (config.statusPort) {

@@ -11,6 +11,8 @@ const execFileP = promisify(execFile);
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const MAX_CACHE_MS = 60 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 100;
+// Looked up once per yt-dlp process at start: the first YouTube video, there since 2005.
+const WARM_UP_VIDEO = 'jNQXAC9IVRw';
 
 const MIME_BY_EXT = {
   m4a: 'audio/mp4',
@@ -70,14 +72,40 @@ export class Resolver {
     this.#cache.delete(videoId);
   }
 
-  async #run(videoId) {
-    const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const args = [
+  #args() {
+    return [
       '--no-playlist', '--no-warnings', '--no-progress',
       '-f', this.cfg.ytdlpFormat,
       ...(this.cfg.ytdlpJsRuntime ? ['--js-runtimes', this.cfg.ytdlpJsRuntime] : []),
       ...this.cfg.ytdlpExtraArgs,
     ];
+  }
+
+  /**
+   * Have each loaded yt-dlp process look up a video once, so the first track the user casts
+   * doesn't wait for what only the first lookup does: fetching and preprocessing YouTube's
+   * player (seconds on a small machine) and connecting to YouTube.
+   */
+  async warmUp() {
+    if (!this.workers) return;
+    const started = Date.now();
+    const results = await this.workers.runOnAll(
+      { op: 'resolve', args: this.#args(), url: `https://www.youtube.com/watch?v=${WARM_UP_VIDEO}` }, this.cfg.ytdlpTimeoutMs);
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    if (ok) this.log.info(`yt-dlp warmed up in ${Date.now() - started} ms (${ok} process${ok > 1 ? 'es' : ''})`);
+    for (const r of results) if (r.status === 'rejected') this.log.debug('yt-dlp warm-up failed:', r.reason?.message);
+  }
+
+  /** After yt-dlp updated itself: load the new version, and warm it up. */
+  restartWorkers() {
+    if (!this.workers) return;
+    this.workers.restart();
+    this.warmUp().catch(() => {});
+  }
+
+  async #run(videoId) {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const args = this.#args();
     const started = Date.now();
     this.log.debug('yt-dlp', args.join(' '), url);
 
@@ -92,6 +120,7 @@ export class Resolver {
     stats.time('resolve', Date.now() - started);
 
     const j = JSON.parse(stdout);
+    if (!j || typeof j !== 'object') throw new Error(`yt-dlp returned no video info for ${videoId}`);
     // With a single selected format, url/ext live at top level; with merged formats they don't.
     const fmt = j.url ? j : (j.requested_formats ?? []).find((f) => f.url);
     if (!fmt?.url) throw new Error(`yt-dlp returned no direct URL for ${videoId} (format "${this.cfg.ytdlpFormat}")`);
@@ -143,7 +172,7 @@ export class Resolver {
 }
 
 /** Periodically self-update yt-dlp. YouTube changes break old versions within weeks. */
-export function scheduleYtdlpUpdates(config, logger, workers = null) {
+export function scheduleYtdlpUpdates(config, logger, resolver = null) {
   if (!config.ytdlpUpdateHours) return null;
   const run = async () => {
     const [cmd, ...args] = config.ytdlpUpdateCmd
@@ -153,7 +182,7 @@ export function scheduleYtdlpUpdates(config, logger, workers = null) {
       const { stdout } = await execFileP(cmd, args, { timeout: 5 * 60 * 1000 });
       logger.info('yt-dlp update:', stdout.trim().split('\n').pop());
       stats.info.ytdlp = await ytdlpVersion(config);
-      workers?.restart(); // the loaded processes still run the old version
+      resolver?.restartWorkers(); // the loaded processes still run the old version
     } catch (err) {
       logger.warn('yt-dlp update failed:', (err.stderr || err.message).toString().trim().split('\n').pop());
     }

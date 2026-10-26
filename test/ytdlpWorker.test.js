@@ -40,6 +40,7 @@ test('worker answers lookups and stays loaded; yt-dlp errors keep it alive', { s
   assert.deepEqual(a.args, ['-f', 'bestaudio']);
   await assert.rejects(w.run(resolveMsg('unavailable'), 5000), (err) => err.kind === 'ytdlp' && /Video unavailable/.test(err.message));
   await assert.rejects(w.run({ op: 'resolve', args: ['--bad-option'], url: 'x' }, 5000), { kind: 'ytdlp' });
+  await assert.rejects(w.run(resolveMsg('ignoredxxxx'), 5000), (err) => err.kind === 'ytdlp' && /not available/.test(err.message));
   const b = JSON.parse(await w.run(resolveMsg('bbbbbbbbbbb'), 5000));
   assert.equal(b.pid, a.pid, 'same process');
 });
@@ -108,7 +109,7 @@ test('downloads go through the worker and keep the 403 flag', { skip }, async (t
   );
 });
 
-test('preprocessed YouTube players are kept in memory, the last two', { skip }, () => {
+test('preprocessed YouTube players are kept in memory, the last four', { skip }, () => {
   const out = execFileSync('python3', ['-c', `
 import sys; sys.path.insert(0, ${JSON.stringify(fileURLToPath(new URL('../src', import.meta.url)))})
 import ytdlp_jsc
@@ -116,15 +117,25 @@ from yt_dlp.cache import Cache
 from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
 print(ytdlp_jsc.install(log=lambda m: None), EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE)
 c = Cache()
-for p in ('a', 'b', 'c'):
+for p in 'abcde':
     c.store('challenge-solver', 'player:' + p, 'pre-' + p)
 c.store('challenge-solver', 'lib', 'script')
-print([c.load('challenge-solver', 'player:' + p) for p in 'abc'], c.load('challenge-solver', 'lib'))
+print([c.load('challenge-solver', 'player:' + p) for p in 'abcde'], c.load('challenge-solver', 'lib'))
 print(sorted(k for _, k in Cache.disk))
 `], { encoding: 'utf8' });
   assert.deepEqual(out.trim().split('\n'), [
     'True True',
-    "[None, 'pre-b', 'pre-c'] script",
+    "[None, 'pre-b', 'pre-c', 'pre-d', 'pre-e'] script",
     "['lib']", // players never reach the disk cache
   ]);
+});
+
+test('warm-up looks a video up once in every process of the pool', { skip }, async (t) => {
+  const lines = [];
+  const r = new Resolver(config(), { ...quiet, info: (...a) => lines.push(a.join(' ')) });
+  t.after(() => r.workers.stop());
+  await r.warmUp();
+  assert.ok(lines.some((l) => /yt-dlp warmed up in \d+ ms \(2 processes\)/.test(l)), lines.join('\n'));
+  const pids = (await r.workers.runOnAll(resolveMsg('aaaaaaaaaaa'), 5000)).map((x) => JSON.parse(x.value).pid);
+  assert.equal(new Set(pids).size, 2, 'both processes stay loaded');
 });

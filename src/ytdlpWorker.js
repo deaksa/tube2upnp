@@ -168,6 +168,13 @@ export class YtdlpWorkers {
     }
   }
 
+  /** Run the same request on every process of the pool (starting them), e.g. to warm them up. */
+  async runOnAll(msg, timeoutMs) {
+    if (!(await this.ready())) return [];
+    // Concurrent requests take an idle process each, starting new ones up to the pool size.
+    return Promise.allSettled(Array.from({ length: this.size }, () => this.run(msg, timeoutMs)));
+  }
+
   /** After yt-dlp updated itself: replace the processes so the new version is loaded. */
   restart() {
     this.#failedStarts = 0; // a new version deserves another try
