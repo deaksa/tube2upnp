@@ -86,6 +86,7 @@ async function shutdown(sig) {
   ssdp.close();
   await devices.stopAll();
   mediaServer.stop();
+  resolver.workers?.stop();
   await history?.flush();
   process.exit(0);
 }
@@ -101,7 +102,9 @@ async function main() {
   log.info('Starting Tube2U[PnP] (a fork of upnpTube)');
   await checkTools();
   stats.startSampling();
-  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
+  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'), resolver.workers);
+  // Load yt-dlp now, not when the first track is cast.
+  resolver.workers?.start();
   await mediaServer.start();
   const search = () => ssdp.search(RENDERER_ST, 3);
   if (config.statusPort) {

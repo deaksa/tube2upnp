@@ -53,7 +53,7 @@ export class MediaServer {
     this.resolver = resolver;
     this.log = logger;
     this.download = opts.download
-      ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest));
+      ?? ((videoId, info, dest) => downloadWithYtdlp(config, logger, videoId, info, dest, resolver?.workers));
     this.fetchImage = opts.fetchImage ?? fetchImage;
     // Default: under DATA_DIR, so the cache survives restarts (and the Docker data volume
     // keeps it). Never the shared temp folder: other local users could read or pre-create

@@ -167,6 +167,8 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 | `YTDLP_UPDATE_HOURS` | `24` | Self-update interval. `0` disables it. |
 | `YTDLP_UPDATE_CMD` | `yt-dlp -U` | Docker image default: pip upgrade inside the venv |
 | `YTDLP_UPDATE_ON_START` | `true` (Docker) | Update yt-dlp before every container start |
+| `YTDLP_WORKERS` | `2` | yt-dlp processes kept loaded between lookups and downloads, so a track doesn't wait for Python and yt-dlp to start (and YouTube's player code is reused). Each takes about 60 MB of RAM; the second starts only when two lookups overlap. `0` starts yt-dlp for every lookup. If the worker can't start (no Python that can `import yt_dlp`, e.g. the standalone yt-dlp binary), that happens automatically. |
+| `YTDLP_PYTHON` | next to `YTDLP_PATH`, else `python3` | The Python that runs those processes. It must be able to import yt-dlp; by default it's the one in yt-dlp's venv (the Docker image's `/opt/yt-dlp`, or pipx's). |
 | `DATA_DIR` | `./data` (`/data` in Docker) | Remembered speakers and their ports, per-renderer screen IDs (so phones remember the receivers), settings, history and the cache |
 | `START_TIMEOUT_MS` | `12000` | With `auto`, try the next format if the renderer hasn't started playing by then |
 | `POLL_INTERVAL_MS` | `2000` | Transport-state polling while playing (used for end-of-track detection) |
