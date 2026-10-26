@@ -150,7 +150,22 @@
   .speaker > .controls { grid-area: ctl; }
   .shead { display: flex; align-items: center; gap: .6rem; margin: -.15rem 0 -.25rem; min-width: 0; }
   .shead .name { font-size: 1.2rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-  .menu { margin-left: auto; position: relative; flex: none; }
+  .menu { position: relative; flex: none; }
+  /* Collapse (▾/▸) and reorder (⠿ handle, or Move up/down in the menu): remembered per browser */
+  .grip { flex: none; cursor: grab; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: .3rem .1rem;
+    user-select: none; touch-action: none; letter-spacing: -.1em; }
+  .grip:active { cursor: grabbing; }
+  .chev { flex: none; margin-left: auto; width: 2.4rem; height: 2.4rem; border-radius: 50%; border: 1px solid transparent;
+    background: none; color: var(--muted); display: grid; place-items: center; cursor: pointer; font-size: 1rem; }
+  .chev:hover { border-color: var(--plate-edge); background: var(--chassis); }
+  .shead .sum { display: none; min-width: 0; flex: 1; font-size: .85rem; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .speaker.collapsed { grid-template-areas: "head"; grid-template-columns: minmax(0, 1fr); padding-bottom: .9rem; }
+  .speaker.collapsed > .display, .speaker.collapsed > .controls { display: none; }
+  .speaker.collapsed .shead .sum { display: block; }
+  .speaker.collapsed .shead .name { flex: none; max-width: 55%; }
+  .speaker.dragging { opacity: .55; outline: 2px dashed var(--vfd); }
+  .dropline { height: 4px; border-radius: 2px; background: var(--vfd); margin: -.8rem 0 .55rem; box-shadow: 0 0 8px rgba(255,181,71,.5); }
   .menu > summary { list-style: none; cursor: pointer; width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid;
     place-items: center; border: 1px solid transparent; font-size: 1.4rem; line-height: 1; color: var(--muted); }
   .menu > summary::-webkit-details-marker { display: none; }
@@ -184,6 +199,7 @@
     .playctl .vrow { flex: 1; max-width: 22rem; margin: .8rem 0 0 auto; }
   }
   .display .next { margin-top: .55rem; }
+  .display .next.wrap { white-space: normal; overflow: visible; }
   .segments.seekable { cursor: pointer; height: .75rem; }
   .segments.seekable:focus-visible { outline-offset: 4px; }
   .dev-icon { width: 1.6rem; height: 1.6rem; object-fit: contain; border-radius: .3rem; flex: none; }
@@ -369,6 +385,68 @@ let speakerData = [];
 let fetchedAt = 0;
 const pairCodes = {};
 
+/* Card order and collapsed cards, remembered in this browser only (they can differ per device). */
+const prefs = (() => {
+  const load = (key) => { try { const v = JSON.parse(localStorage.getItem(key)); return Array.isArray(v) ? v : []; } catch { return []; } };
+  return { order: load('tube2upnp.order'), collapsed: new Set(load('tube2upnp.collapsed')) };
+})();
+function savePrefs() {
+  try {
+    localStorage.setItem('tube2upnp.order', JSON.stringify(prefs.order));
+    localStorage.setItem('tube2upnp.collapsed', JSON.stringify([...prefs.collapsed]));
+  } catch { /* private mode, storage blocked: it just isn't remembered */ }
+}
+let cardIds = []; // ids of the cards on screen, in order
+
+/** Put a card somewhere else: before `beforeId`, or last when null. */
+function moveCard(id, beforeId) {
+  const ids = cardIds.filter((x) => x !== id);
+  const at = beforeId == null ? ids.length : ids.indexOf(beforeId);
+  ids.splice(at < 0 ? ids.length : at, 0, id);
+  // Keep the place of speakers not on screen now (ignored, gone) after the ones that are.
+  prefs.order = [...ids, ...prefs.order.filter((x) => !ids.includes(x))];
+  savePrefs();
+  holdRefreshUntil = 0;
+  renderSpeakers(lastApp);
+}
+
+/** Drag a card by its ⠿ handle (mouse or touch); a line shows where it lands. */
+function dragCard(e, id) {
+  const card = e.currentTarget.closest('.speaker');
+  const root = card.parentElement;
+  const cards = [...root.querySelectorAll(':scope > .speaker')];
+  const handle = e.currentTarget;
+  e.preventDefault();
+  handle.setPointerCapture(e.pointerId);
+  holdRefresh(60000);
+  card.classList.add('dragging');
+  const line = h('div', { class: 'dropline', 'aria-hidden': 'true' });
+  let before = null;
+  let moved = false;
+  const move = (ev) => {
+    moved = true;
+    // Near the top or bottom of the window, scroll so far-away cards can be reached.
+    if (ev.clientY < 60) window.scrollBy(0, -12);
+    else if (ev.clientY > window.innerHeight - 60) window.scrollBy(0, 12);
+    const next = cards.find((c) => c !== card && ev.clientY < c.getBoundingClientRect().top + c.offsetHeight / 2) ?? null;
+    before = next;
+    if (next) root.insertBefore(line, next); else cards.at(-1).after(line);
+  };
+  const end = (ev) => {
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', end);
+    handle.removeEventListener('pointercancel', end);
+    line.remove();
+    card.classList.remove('dragging');
+    if (ev.type === 'pointerup' && moved) moveCard(id, before ? before.dataset.id : null);
+    else releaseRefresh(0);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+
+let lastApp = {};
 async function refreshSpeakers() {
   try {
     const s = await api('/api/status');
@@ -379,10 +457,14 @@ async function refreshSpeakers() {
 }
 
 function renderSpeakers(app) {
+  lastApp = app;
   const root = document.getElementById('speakers');
   const focused = document.activeElement?.dataset?.key;
   root.replaceChildren();
-  const shown = speakerData.filter((r) => r.state !== 'ignored');
+  const rank = (r) => { const i = prefs.order.indexOf(r.id); return i < 0 ? Infinity : i; };
+  // Your order first; speakers you haven't placed keep the server's order (online first), after them.
+  const shown = speakerData.filter((r) => r.state !== 'ignored').sort((a, b) => rank(a) - rank(b));
+  cardIds = shown.map((r) => r.id);
   const ignored = speakerData.filter((r) => r.state === 'ignored');
   if (!shown.length) {
     root.append(h('div', { class: 'empty' },
@@ -390,7 +472,12 @@ function renderSpeakers(app) {
       h('p', { class: 'hint' }, 'Tube2U[PnP] looks for DLNA/UPnP renderers on startup and every few minutes. '
         + 'If yours is missing, check that this machine is on the same network and that UDP port 1900 is not blocked.')));
   }
-  for (const r of shown) root.append(r.state === 'online' ? speakerRow(r, app) : awayRow(r));
+  for (const r of shown) {
+    const card = r.state === 'online' ? speakerRow(r, app) : awayRow(r);
+    card.dataset.id = r.id;
+    card.classList.toggle('collapsed', prefs.collapsed.has(r.id));
+    root.append(card);
+  }
   if (ignored.length) root.append(ignoredList(ignored));
   if (focused) root.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus();
   tick();
@@ -509,21 +596,48 @@ function seekable(meter, r) {
   return meter;
 }
 
-/** Status LED, icon and name, with the less used actions in a "⋯" menu. */
-function cardHead(r, ledClass, items) {
+/**
+ * Status LED, icon and name, with the less used actions in a "⋯" menu. With more than one
+ * card, a ⠿ handle to drag it elsewhere; ▾/▸ collapses it to this line, with `summary`.
+ */
+function cardHead(r, ledClass, items, summary) {
   const name = r.friendlyName || r.name;
-  const menu = items.length ? h('details', { class: 'menu', open: openMenu === r.id,
+  const i = cardIds.indexOf(r.id);
+  const several = cardIds.length > 1;
+  const moves = several ? [
+    i > 0 ? ['Move up', 'Change the order of the speakers', () => moveCard(r.id, cardIds[i - 1])] : null,
+    i < cardIds.length - 1 ? ['Move down', 'Change the order of the speakers', () => moveCard(r.id, cardIds[i + 2] ?? null)] : null,
+  ].filter(Boolean) : [];
+  const all = [...moves, ...items];
+  const menu = all.length ? h('details', { class: 'menu', open: openMenu === r.id,
     ontoggle: (e) => {
       if (!e.target.open) { if (openMenu === r.id) openMenu = null; return; }
       openMenu = r.id;
       document.querySelectorAll('details.menu[open]').forEach((d) => { if (d !== e.target) d.open = false; });
     } },
   h('summary', { 'aria-label': 'More actions for ' + name, title: 'More actions', 'data-key': 'menu-' + r.id }, '⋯'),
-  h('div', { class: 'pop', role: 'menu' }, items.map(([label, hint, onclick, danger]) => h('button', {
+  h('div', { class: 'pop', role: 'menu' }, all.map(([label, hint, onclick, danger]) => h('button', {
     role: 'menuitem', class: danger ? 'danger' : null, onclick: (e) => { openMenu = null; e.target.closest('details').open = false; onclick(); },
   }, label, h('small', {}, hint))))) : null;
-  return h('div', { class: 'shead' }, h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), iconImg(r),
-    h('h2', { class: 'name', title: name }, name), menu);
+  const collapsed = prefs.collapsed.has(r.id);
+  const chev = h('button', { class: 'chev', 'data-key': 'fold-' + r.id, 'aria-expanded': String(!collapsed),
+    'aria-label': (collapsed ? 'Expand ' : 'Collapse ') + name, title: collapsed ? 'Expand' : 'Collapse',
+    onclick: () => {
+      if (prefs.collapsed.has(r.id)) prefs.collapsed.delete(r.id); else prefs.collapsed.add(r.id);
+      savePrefs();
+      const now = prefs.collapsed.has(r.id);
+      chev.closest('.speaker').classList.toggle('collapsed', now);
+      chev.textContent = now ? '▸' : '▾';
+      chev.setAttribute('aria-expanded', String(!now));
+      chev.setAttribute('aria-label', (now ? 'Expand ' : 'Collapse ') + name);
+      chev.title = now ? 'Expand' : 'Collapse';
+    } }, collapsed ? '▸' : '▾');
+  return h('div', { class: 'shead' },
+    several ? h('span', { class: 'grip', title: 'Drag to reorder', 'aria-hidden': 'true', onpointerdown: (e) => dragCard(e, r.id) }, '⠿') : null,
+    h('span', { class: 'led ' + ledClass, 'aria-hidden': 'true' }), iconImg(r),
+    h('h2', { class: 'name', title: name }, name),
+    summary ? h('span', { class: 'sum', title: summary }, summary) : null,
+    chev, menu);
 }
 
 async function speakerPost(r, action, question) {
@@ -569,7 +683,8 @@ function speakerRow(r, app) {
       Array.from({ length: 40 }, () => h('i'))), r), h('span', { class: 'time', 'data-time': r.id })) : null,
       hasTransport ? transport(r) : null,
       np?.quality ? h('p', { class: 'next', title: qualityTitle(np.quality) }, qualityText(np.quality)) : null,
-      r.upNext ? h('p', { class: 'next' }, 'Up next: ' + r.upNext.title + (r.upNext.gapless ? ' (gapless)' : '')) : null,
+      r.upNext ? h('p', { class: 'next wrap' }, 'Up next: ' + [r.upNext.artist, r.upNext.title].filter(Boolean).join(' – ')
+        + (r.upNext.gapless ? ' (gapless)' : '')) : null,
       r.sponsorblock?.segments.length ? h('p', { class: 'next' }, 'SponsorBlock: ' + r.sponsorblock.segments.length
         + (r.sponsorblock.segments.length === 1 ? ' segment' : ' segments') + ' marked, ' + r.sponsorblock.skipped + ' skipped') : null) : null);
 
@@ -597,12 +712,15 @@ function speakerRow(r, app) {
     catch (err) { toast(err.message); }
     refreshSpeakers();
   };
+  const summary = np ? [np.title, np.artist].filter(Boolean).join(' · ')
+    : ext ? (ext.state === 'PLAYING' ? 'Playing another source' : 'Paused on another source') + ' · ' + externalText(ext)
+      : r.power === 'standby' ? 'Standby' : r.senders.length ? 'Connected, nothing playing' : 'Ready to cast';
   return h('article', { class: 'speaker', 'aria-label': r.name },
     cardHead(r, ledClass, [
       [code ? 'New TV code' : 'Get TV code', 'Link the YouTube app without discovery', getCode],
       ['Ignore', 'Leave the cast menu and free its port', () => speakerPost(r, 'ignore', 'Ignore ' + name + '? Its receiver stops and it '
         + 'leaves the cast menu until you allow it again. Its port and saved settings are freed.'), true],
-    ]),
+    ], summary),
     display,
     h('div', { class: 'controls' },
       h('p', { class: 'device', style: 'margin-top:0' }, [r.manufacturer, r.model].filter(Boolean).join(' ') + ' at ' + r.address, devicePage(r)),
@@ -702,7 +820,7 @@ function awayRow(r) {
     ['Ignore', 'Never set it up again', () => speakerPost(r, 'ignore', 'Ignore ' + name + '? It is not set up again until you allow it.'), true],
   ];
   return h('article', { class: 'speaker away', 'aria-label': name },
-    cardHead(r, r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : '', menu),
+    cardHead(r, r.state === 'error' ? 'err' : r.state === 'starting' ? 'warn' : '', menu, (STATE_TEXT[r.state] || r.state) + ' · ' + detail),
     h('div', { class: 'display idle' }, h('div', { class: 'cover none', 'aria-hidden': 'true' }, '♪'),
       h('div', { class: 'info' }, h('p', { class: 'title' }, STATE_TEXT[r.state] || r.state), h('p', { class: 'artist' }, detail))),
     h('div', { class: 'controls' },
