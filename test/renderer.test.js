@@ -6,19 +6,23 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Renderer } from '../src/renderer.js';
+import { PLAYER_STATUSES } from 'yt-cast-receiver';
 import { Logger } from '../src/logger.js';
 import { startFakeRenderer } from './fakeRenderer.js';
 
 class FakeReceiver extends EventEmitter {
   status = 'stopped';
-  async start() { this.status = 'running'; }
-  async stop() { this.status = 'stopped'; }
+  starts = 0;
+  stops = 0;
+  async start() { this.status = 'running'; this.starts++; }
+  async stop() { this.status = 'stopped'; this.stops++; }
   enableAutoplayOnConnect() {}
   getConnectedSenders() { return []; }
 }
 
 function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), 'tube2upnp-')), extraDeps = {}) {
   let receiverOpts;
+  let receiver;
   const registered = [];
   const resolves = [];
   const config = {
@@ -41,11 +45,11 @@ function setup(fake, overrides = {}, dataDir = mkdtempSync(path.join(tmpdir(), '
           return `/stream/${String(registered.length).padStart(32, '0')}.${e.format === 'direct' ? e.ext : e.format}`;
         },
       },
-      createReceiver: (_p, opts) => { receiverOpts = opts; return new FakeReceiver(); },
+      createReceiver: (_p, opts) => { receiverOpts = opts; return (receiver = new FakeReceiver()); },
       ...extraDeps,
     },
   });
-  return { r, registered, resolves, opts: () => receiverOpts };
+  return { r, registered, resolves, opts: () => receiverOpts, receiver: () => receiver };
 }
 
 test('init handles embedded renderer and names the receiver', async (t) => {
@@ -981,4 +985,47 @@ test('a track cached as a file starts without a yt-dlp lookup; streamed formats 
     await r.destroy();
   }
   assert.equal(entries[0].info.fromCache, true, 'the media server is told the details came from the cache');
+});
+
+test('after its YouTube connection broke, the cast receiver restarts once, when nothing plays', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, opts, receiver } = setup(fake, { receiverCheckMs: 20, receiverSettleMs: 60 });
+  await r.init();
+  assert.equal(receiver().starts, 1);
+  const log = opts().logger;
+  // yt-cast-receiver reports it like this, once per client (YouTube, YouTube Music).
+  log.error('[yt-cast-receiver] (YouTube) RPC connection terminated due to error:', new Error('bad response'));
+  log.error('[yt-cast-receiver] (YouTube Music) RPC connection terminated due to error:', new Error('bad response'));
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(receiver().stops, 0, 'not while the errors are still coming');
+  await new Promise((res) => setTimeout(res, 150));
+  assert.equal(receiver().stops, 1);
+  assert.equal(receiver().starts, 2);
+  assert.equal(receiver().status, 'running');
+  await new Promise((res) => setTimeout(res, 100));
+  assert.equal(receiver().starts, 2, 'only once');
+
+  log.error('[yt-cast-receiver] some other error');
+  log.error('[yt-cast-receiver] (YouTube) RPC connection terminated due to error:', new Error('again'));
+  await r.destroy();
+  await new Promise((res) => setTimeout(res, 150));
+  assert.equal(receiver().starts, 2, 'not after the device is gone');
+});
+
+test('a broken YouTube connection never restarts the receiver mid-track', async (t) => {
+  const fake = await startFakeRenderer();
+  t.after(() => fake.server.close());
+  const { r, opts, receiver } = setup(fake, { receiverCheckMs: 20, receiverSettleMs: 20 });
+  await r.init();
+  r.setLogger(new Logger('none'));
+  await r.play({ id: 'dQw4w9WgXcQ', client: { key: 'YT' } }, 0);
+  assert.equal(r.status, PLAYER_STATUSES.PLAYING);
+  opts().logger.error('[yt-cast-receiver] (YouTube) RPC connection terminated due to error:', new Error('x'));
+  await new Promise((res) => setTimeout(res, 150));
+  assert.equal(receiver().stops, 0, 'the music goes on');
+  await r.stop();
+  await new Promise((res) => setTimeout(res, 150));
+  assert.equal(receiver().stops, 1, 'restarted once it stopped');
+  await r.destroy();
 });

@@ -208,6 +208,10 @@ With Docker Compose, put these in `.env`; `docker-compose.yml` passes them all t
 - **Premium quality:** cookies from a YouTube Premium account also unlock YouTube's 256 kbps AAC (format 141), which the default `YTDLP_FORMAT` picks by itself. The status page then shows "AAC 258 kbps · high quality". Tracks already in the cache keep the quality they were downloaded with, so use **Clear cache** after setting up cookies.
 - A track that yt-dlp can't get at all (it needs a sign-in, or it's removed or region-locked) is skipped, and the queue goes on with the next one, as in the YouTube apps. After 5 such tracks in a row, playback stops, and the log tells you to check yt-dlp. A speaker that refuses to play (for example in standby) is never skipped through.
 
+**Music stops, the YouTube app takes over playback, and the status page doesn't answer for a while.**
+- That's the server standing still: a paused or saved VM, a host going to sleep, or a machine out of memory. The log then says `This process stood still for ...` or `The clock jumped forward ...`. Check the host's power settings and the VM's (no automatic checkpoints or "save" on host events, fixed memory).
+- YouTube drops the cast session meanwhile. Tube2U[PnP] then restarts that speaker's cast receiver once nothing plays, so the next cast starts cleanly. Until then the YouTube app may not follow playback (0:00, play button); casting again after the restart fixes it.
+
 **Seeking.** With `direct`, `mp4` and `flac` the renderer seeks natively. With `adts` and `mp3`, Tube2U[PnP] restarts the stream from the new position, so a seek takes a second or two longer.
 
 ## What changed since upnpTube
