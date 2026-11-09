@@ -139,3 +139,19 @@ test('warm-up looks a video up once in every process of the pool', { skip }, asy
   const pids = (await r.workers.runOnAll(resolveMsg('aaaaaaaaaaa'), 5000)).map((x) => JSON.parse(x.value).pid);
   assert.equal(new Set(pids).size, 2, 'both processes stay loaded');
 });
+
+test('a cookies.txt replaced while running is loaded, never overwritten with the old cookies', { skip }, async (t) => {
+  const { utimesSync } = await import('node:fs');
+  const dir = mkdtempSync(path.join(tmpdir(), 'cookies-'));
+  const file = path.join(dir, 'cookies.txt');
+  writeFileSync(file, 'old');
+  const w = new YtdlpWorkers(config({ ytdlpWorkers: 1 }), quiet);
+  t.after(() => w.stop());
+  const msg = { op: 'resolve', args: ['--cookies', file], url: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' };
+  assert.equal(JSON.parse(await w.run(msg, 5000)).cookies, 'old');
+  writeFileSync(file, 'new'); // the user copies in fresh cookies
+  const later = new Date(Date.now() + 5000);
+  utimesSync(file, later, later); // a different mtime even on coarse filesystem clocks
+  assert.equal(JSON.parse(await w.run(msg, 5000)).cookies, 'new', 'reloaded');
+  assert.equal(readFileSync(file, 'utf8'), 'new', 'not overwritten with the old ones');
+});

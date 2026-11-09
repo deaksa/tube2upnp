@@ -55,7 +55,39 @@ def make(args):
 
 # One YoutubeDL per set of options, reused: it keeps YouTube's player code and solved
 # challenges in memory. Downloads write to a new file each time, so they get a fresh one.
-resolvers = {}
+resolvers = {}  # args -> (YoutubeDL, the cookie file's mtime it last loaded or saved)
+
+
+def cookie_mtime(ydl):
+    path = ydl.params.get('cookiefile')
+    try:
+        return os.stat(path).st_mtime_ns if path else None
+    except OSError:
+        return None
+
+
+def retire(ydl, mtime):
+    # Closing saves the cookies held in memory. If someone else wrote the file since (a new
+    # cookies.txt copied in, or another worker's save), that would overwrite theirs.
+    if cookie_mtime(ydl) != mtime:
+        ydl.params['cookiefile'] = None
+    ydl.close()
+
+
+def resolver_for(args):
+    key = json.dumps(args)
+    entry = resolvers.get(key)
+    if entry and cookie_mtime(entry[0]) != entry[1]:
+        # The cookie file changed under us: load it afresh instead of keeping (and later
+        # saving back) the old cookies.
+        retire(*resolvers.pop(key))
+        entry = None
+    if entry is None:
+        if len(resolvers) >= 4:
+            retire(*resolvers.pop(next(iter(resolvers))))
+        ydl = make(args)
+        entry = resolvers[key] = (ydl, cookie_mtime(ydl))
+    return entry[0]
 
 
 def handle(req):
@@ -63,17 +95,17 @@ def handle(req):
     if op == 'ping':
         return {'version': yt_dlp.version.__version__, 'fastJsc': fast_jsc}
     if op == 'resolve':
-        key = json.dumps(req['args'])
-        ydl = resolvers.get(key)
-        if ydl is None:
-            if len(resolvers) >= 4:
-                resolvers.pop(next(iter(resolvers))).close()
-            ydl = resolvers[key] = make(req['args'])
+        ydl = resolver_for(req['args'])
         Log.last_error = None
         info = ydl.extract_info(req['url'], download=False)
         if info is None:  # the command line's ignoreerrors: the error only went to the logger
             raise RuntimeError(Log.last_error or 'no video info')
-        ydl.save_cookies()  # like the command line does on exit: YouTube rotates them
+        key = json.dumps(req['args'])
+        if cookie_mtime(ydl) == resolvers[key][1]:
+            ydl.save_cookies()  # like the command line does on exit: YouTube rotates them
+            resolvers[key] = (ydl, cookie_mtime(ydl))
+        else:
+            retire(*resolvers.pop(key))  # changed during the lookup: theirs wins
         return json.dumps(ydl.sanitize_info(info))
     if op == 'download':
         Log.last_error = None

@@ -10,7 +10,8 @@ from . import version  # noqa: F401  (the worker reads yt_dlp.version.__version_
 
 class _Parsed:
     def __init__(self, args):
-        self.ydl_opts = {'args': args, 'logger': None}
+        self.ydl_opts = {'args': args, 'logger': None,
+                         'cookiefile': args[args.index('--cookies') + 1] if '--cookies' in args else None}
 
 
 def parse_options(args):
@@ -23,6 +24,11 @@ class YoutubeDL:
     def __init__(self, opts):
         self.args = opts['args']
         self.logger = opts['logger']
+        self.params = opts
+        self.jar = None  # the cookies, as read when created (like yt-dlp's cookie jar)
+        if opts['cookiefile']:
+            with open(opts['cookiefile']) as f:
+                self.jar = f.read()
 
     def __enter__(self):
         return self
@@ -31,10 +37,12 @@ class YoutubeDL:
         self.close()
 
     def close(self):
-        pass
+        self.save_cookies()
 
     def save_cookies(self):
-        pass
+        if self.params.get('cookiefile') is not None:
+            with open(self.params['cookiefile'], 'w') as f:
+                f.write(self.jar)
 
     def sanitize_info(self, info):
         return info
@@ -54,7 +62,7 @@ class YoutubeDL:
         print('noise on stdout', flush=True)  # must not disturb the replies
         return {'id': vid, 'url': 'https://r1.googlevideo.com/videoplayback?expire=9999999999',
                 'ext': 'm4a', 'title': 'Worker ' + vid, 'format_id': '140', 'pid': os.getpid(),
-                'args': self.args}
+                'args': self.args, 'cookies': self.jar}
 
     def download_with_info_file(self, path):
         with open(path) as f:
