@@ -168,3 +168,15 @@ test('streamQuality: what the speaker gets, from yt-dlp or from the cached file'
   assert.equal(qualityLabel(null), null);
 });
 
+
+test('a process that stood still, or a corrected clock, is reported', async () => {
+  const { pauseMessage } = await import('../src/pauseWatch.js');
+  const at = (mono, wall = mono) => ({ mono, wall });
+  assert.equal(pauseMessage(at(0), at(1000), 1000, 5000), null, 'on time');
+  assert.equal(pauseMessage(at(0), at(4000), 1000, 5000), null, 'a little late');
+  assert.match(pauseMessage(at(0), at(48_000), 1000, 5000), /stood still for 47 s/);
+  assert.match(pauseMessage(at(0), at(3_601_000), 1000, 5000), /stood still for 60 min/);
+  // The VM's monotonic clock skipped the pause; the wall clock was stepped afterwards.
+  assert.match(pauseMessage(at(0, 0), at(1000, 113_000), 1000, 5000), /clock jumped forward 112 s/);
+  assert.match(pauseMessage(at(0, 0), at(1000, -9000), 1000, 5000), /clock jumped back 10 s/);
+});

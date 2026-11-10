@@ -363,3 +363,19 @@ test('prepare() reports the audio actually in the cached file (it may predate th
   assert.deepEqual(await ms.prepare({ videoId: 'qqqqqqqqqqq', format: 'adts', ext: 'm4a' }), {}, 'streamed formats: nothing to probe');
   assert.equal(await ms.probeAudio(null), null);
 });
+
+test('a cached track keeps its details, so it can start without a lookup', { skip: !hasFfmpeg }, async (t) => {
+  const { ms, dir } = await harness(t);
+  const info = { title: 'Song', artist: 'Band', thumbnail: 'https://i.ytimg.com/vi/x/hq.jpg', duration: 60, ext: 'm4a', mime: 'audio/mp4', formatId: '141', url: 'https://secret' };
+  assert.equal(await ms.cachedInfo('kkkkkkkkkkk'), null, 'nothing cached yet');
+  await ms.prepare({ videoId: 'kkkkkkkkkkk', format: 'mp4', ext: 'm4a', info });
+  const cached = await ms.cachedInfo('kkkkkkkkkkk');
+  assert.deepEqual(cached, { fromCache: true, title: 'Song', artist: 'Band', album: '', thumbnail: info.thumbnail, duration: 60, ext: 'm4a', mime: 'audio/mp4', formatId: '141' });
+  assert.ok(!readFileSync(path.join(dir, 'cache', 'kkkkkkkkkkk.meta.json'), 'utf8').includes('secret'), 'no stream URL kept');
+  assert.equal(await ms.cachedInfo('../../etc/x'), null);
+
+  // Details whose audio is gone are useless: cleared with the cache.
+  await ms.clearCache();
+  assert.equal(await ms.cachedInfo('kkkkkkkkkkk'), null);
+  assert.ok(!readdirSync(path.join(dir, 'cache')).some((f) => f.endsWith('.meta.json')));
+});

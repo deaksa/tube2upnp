@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { Logger } from './logger.js';
 import { Ssdp, udnFromUsn, maxAge } from './ssdp.js';
 import { Resolver, scheduleYtdlpUpdates, ytdlpVersion } from './resolver.js';
+import { watchPauses } from './pauseWatch.js';
 import { stats } from './stats.js';
 import { Settings } from './settings.js';
 import { SponsorBlock, CATEGORIES } from './sponsorblock.js';
@@ -86,6 +87,7 @@ async function shutdown(sig) {
   ssdp.close();
   await devices.stopAll();
   mediaServer.stop();
+  resolver.workers?.stop();
   await history?.flush();
   process.exit(0);
 }
@@ -101,7 +103,10 @@ async function main() {
   log.info('Starting Tube2U[PnP] (a fork of upnpTube)');
   await checkTools();
   stats.startSampling();
-  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'));
+  watchPauses(log);
+  scheduleYtdlpUpdates(config, log.child('[yt-dlp]'), resolver);
+  // Load yt-dlp and YouTube's player now, not when the first track is cast.
+  resolver.warmUp().catch(() => {});
   await mediaServer.start();
   const search = () => ssdp.search(RENDERER_ST, 3);
   if (config.statusPort) {

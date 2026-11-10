@@ -17,6 +17,12 @@ const PREFETCH_RETRY_MS = 30 * 1000;
 const PREFETCH_RETRY_MAX_MS = 10 * 60 * 1000;
 const MAX_UNPLAYABLE_IN_A_ROW = 5;
 const PREVIOUS_RESTARTS_AFTER_S = 5;
+// After yt-cast-receiver reconnects to YouTube on its own (see #receiverBroke): how often to
+// check whether the receiver can be restarted, how long after the last error, and how long
+// a paused track holds that off.
+const RECEIVER_CHECK_MS = 15 * 1000;
+const RECEIVER_SETTLE_MS = 10 * 1000;
+const RECEIVER_PAUSED_MAX_MS = 10 * 60 * 1000;
 
 export class Renderer extends Player {
   #call;
@@ -55,6 +61,7 @@ export class Renderer extends Player {
   #polling = false;
   #gaplessSupported = null; // null = unknown, learned from SetNextAVTransportURI
   #destroyed = false;
+  #receiverStale = null;   // { at, timer, pausedSince } after its YouTube connection broke
 
   /**
    * @param {object} p
@@ -193,7 +200,7 @@ export class Renderer extends Player {
         model: desc.modelName || 'UPnP Renderer',
       },
       dataStore: this.#store,
-      logger: this.baseLog.child(`[ytcr ${desc.friendlyName}]`),
+      logger: this.#receiverLogger(this.baseLog.child(`[ytcr ${desc.friendlyName}]`)),
       logLevel: this.cfg.logLevel,
     });
     this.#receiver.enableAutoplayOnConnect(this.cfg.autoplayOnConnect);
@@ -211,9 +218,76 @@ export class Renderer extends Player {
     return true;
   }
 
+  /**
+   * The logger handed to yt-cast-receiver, watching for one error. When its connection to
+   * YouTube breaks (a network drop, the VM paused), it gets a new lounge token and carries
+   * on without telling us, and that session can stay half-working: commands from the app
+   * still arrive, but the app no longer takes our status (it shows 0:00 and a play button),
+   * and reconnecting the app doesn't help. Only a fresh start does.
+   */
+  #receiverLogger(logger) {
+    const error = logger.error.bind(logger);
+    logger.error = (...m) => {
+      error(...m);
+      if (typeof m[0] === 'string' && m[0].includes('RPC connection terminated due to error')) this.#receiverBroke();
+    };
+    return logger;
+  }
+
+  #receiverBroke() {
+    if (this.#destroyed) return;
+    if (this.#receiverStale) {
+      this.#receiverStale.at = Date.now();
+      return;
+    }
+    this.#receiverStale = { at: Date.now(), pausedSince: null, timer: setInterval(() => this.#checkReceiver(), this.cfg.receiverCheckMs ?? RECEIVER_CHECK_MS) };
+    this.#receiverStale.timer.unref?.();
+    this.log.info('YouTube connection broke - the cast receiver will restart once nothing is playing');
+  }
+
+  /** Restart the receiver once its YouTube connection settled and nothing plays (that would stop it). */
+  #checkReceiver() {
+    const stale = this.#receiverStale;
+    if (!stale || this.#destroyed || !this.#receiver) return;
+    if (Date.now() - stale.at < (this.cfg.receiverSettleMs ?? RECEIVER_SETTLE_MS)) return; // errors in a burst: let them pass
+    if (this.status === PLAYER_STATUSES.PLAYING || this.status === PLAYER_STATUSES.LOADING) {
+      stale.pausedSince = null;
+      return;
+    }
+    // Paused: it may be resumed from the app (commands still arrive); not forever, though.
+    if (this.status === PLAYER_STATUSES.PAUSED) {
+      stale.pausedSince ??= Date.now();
+      if (Date.now() - stale.pausedSince < RECEIVER_PAUSED_MAX_MS) return;
+    }
+    this.#clearReceiverStale();
+    this.#restartReceiver().catch(() => {});
+  }
+
+  #clearReceiverStale() {
+    clearInterval(this.#receiverStale?.timer);
+    this.#receiverStale = null;
+  }
+
+  async #restartReceiver() {
+    const receiver = this.#receiver;
+    this.log.warn('Restarting the cast receiver after its YouTube connection broke');
+    try {
+      if (receiver.status === 'running') await receiver.stop();
+      if (this.#destroyed || this.#receiver !== receiver) return;
+      await receiver.start();
+      this.log.info(`Cast receiver "${this.name}" ready again`);
+    } catch (err) {
+      // Leave it to the device manager, as when the receiver terminates by itself.
+      this.lastError = `Receiver restart failed: ${err.message}`;
+      this.log.error(this.lastError);
+      this.onTerminate?.(err);
+    }
+  }
+
   async destroy() {
     // A load, prefetch or poll still in flight must not bring polling back afterwards.
     this.#destroyed = true;
+    this.#clearReceiverStale();
     this.#loadSeq++;
     this.#current = null;
     this.#queued = null;
@@ -342,14 +416,14 @@ export class Renderer extends Player {
 
   /** Resolve, build (mp4/flac) and register a track; returns everything needed to play it. */
   async #prepareItem(video, position, format = null, offsetStart = false) {
-    const info = await this.resolver.resolve(video.id);
+    const info = await this.#trackInfo(video.id, format);
     format ??= this.#chooseFormat(info.mime);
     const mime = mimeOf(format, info.mime);
     // Seekable formats start at 0 and use AVTransport Seek; streams start ffmpeg at the offset.
     const startAt = (offsetStart || !FORMATS[format].seekable) && position > 1 ? Math.floor(position) : 0;
     const current = { video, format, startAt, mime: info.mime, loadedAt: 0, fetched: false, streamPath: null };
     const entry = {
-      videoId: video.id, format, ext: info.ext, startAt,
+      videoId: video.id, format, ext: info.ext, startAt, info,
       onRequest: () => {
         if (!current.fetched) this.log.info(`Renderer started fetching the stream (${format})`);
         current.fetched = true;
@@ -372,6 +446,20 @@ export class Renderer extends Player {
       isVideo: mime.startsWith('video/'),
     });
     return { current, info, format, mime, url, streamPath, metadata, quality };
+  }
+
+  /**
+   * The track's details: from the cache when its audio is there and will be played from a
+   * file (mp4/flac), which saves a yt-dlp lookup of a few seconds; else from yt-dlp.
+   */
+  async #trackInfo(videoId, format) {
+    const cached = await this.media.cachedInfo?.(videoId).catch(() => null);
+    if (cached && FILE_FORMATS.includes(format ?? this.#chooseFormat(cached.mime))) {
+      this.log.info(`"${cached.title}" is in the cache - starting it without a lookup`);
+      stats.inc('resolve.skippedCached');
+      return cached;
+    }
+    return this.resolver.resolve(videoId);
   }
 
   /** Make `item` the current track (after we loaded it, or the renderer switched to it). */

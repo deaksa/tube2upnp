@@ -4,12 +4,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { writeFile, rm } from 'node:fs/promises';
 import { stats } from './stats.js';
+import { YtdlpWorkers } from './ytdlpWorker.js';
 
 const execFileP = promisify(execFile);
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const MAX_CACHE_MS = 60 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 100;
+// Looked up once per yt-dlp process at start: the first YouTube video, there since 2005.
+const WARM_UP_VIDEO = 'jNQXAC9IVRw';
 
 const MIME_BY_EXT = {
   m4a: 'audio/mp4',
@@ -41,6 +44,8 @@ export class Resolver {
   constructor(config, logger) {
     this.cfg = config;
     this.log = logger;
+    // yt-dlp kept loaded between lookups (YTDLP_WORKERS=0: run it once per lookup).
+    this.workers = config.ytdlpWorkers > 0 ? new YtdlpWorkers(config, logger) : null;
   }
 
   /**
@@ -67,24 +72,46 @@ export class Resolver {
     this.#cache.delete(videoId);
   }
 
-  async #run(videoId) {
-    const args = [
-      '--dump-json', '--no-playlist', '--no-warnings', '--no-progress',
+  #args() {
+    return [
+      '--no-playlist', '--no-warnings', '--no-progress',
       '-f', this.cfg.ytdlpFormat,
       ...(this.cfg.ytdlpJsRuntime ? ['--js-runtimes', this.cfg.ytdlpJsRuntime] : []),
       ...this.cfg.ytdlpExtraArgs,
-      '--', `https://www.youtube.com/watch?v=${videoId}`,
     ];
+  }
+
+  /**
+   * Have each loaded yt-dlp process look up a video once, so the first track the user casts
+   * doesn't wait for what only the first lookup does: fetching and preprocessing YouTube's
+   * player (seconds on a small machine) and connecting to YouTube.
+   */
+  async warmUp() {
+    if (!this.workers) return;
     const started = Date.now();
-    this.log.debug('yt-dlp', args.join(' '));
+    const results = await this.workers.runOnAll(
+      { op: 'resolve', args: this.#args(), url: `https://www.youtube.com/watch?v=${WARM_UP_VIDEO}` }, this.cfg.ytdlpTimeoutMs);
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    if (ok) this.log.info(`yt-dlp warmed up in ${Date.now() - started} ms (${ok} process${ok > 1 ? 'es' : ''})`);
+    for (const r of results) if (r.status === 'rejected') this.log.debug('yt-dlp warm-up failed:', r.reason?.message);
+  }
+
+  /** After yt-dlp updated itself: load the new version, and warm it up. */
+  restartWorkers() {
+    if (!this.workers) return;
+    this.workers.restart();
+    this.warmUp().catch(() => {});
+  }
+
+  async #run(videoId) {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const args = this.#args();
+    const started = Date.now();
+    this.log.debug('yt-dlp', args.join(' '), url);
 
     let stdout;
     try {
-      // execFile, not exec: the video ID never touches a shell.
-      ({ stdout } = await execFileP(this.cfg.ytdlpPath, args, {
-        timeout: this.cfg.ytdlpTimeoutMs,
-        maxBuffer: 32 * 1024 * 1024,
-      }));
+      stdout = await this.#lookup(args, url);
     } catch (err) {
       stats.inc('resolve.failed');
       const detail = (err.stderr || err.message || '').toString().trim().split('\n').slice(-3).join(' | ');
@@ -93,6 +120,7 @@ export class Resolver {
     stats.time('resolve', Date.now() - started);
 
     const j = JSON.parse(stdout);
+    if (!j || typeof j !== 'object') throw new Error(`yt-dlp returned no video info for ${videoId}`);
     // With a single selected format, url/ext live at top level; with merged formats they don't.
     const fmt = j.url ? j : (j.requested_formats ?? []).find((f) => f.url);
     if (!fmt?.url) throw new Error(`yt-dlp returned no direct URL for ${videoId} (format "${this.cfg.ytdlpFormat}")`);
@@ -121,10 +149,30 @@ export class Resolver {
     this.log.info(`Resolved ${videoId} "${info.title}" (${info.ext}, ${info.mime}) in ${Date.now() - started} ms`);
     return info;
   }
+
+  /** yt-dlp's info JSON for the URL: from a loaded worker if there is one, else a fresh yt-dlp. */
+  async #lookup(args, url) {
+    if (await this.workers?.ready()) {
+      try {
+        return await this.workers.run({ op: 'resolve', args, url }, this.cfg.ytdlpTimeoutMs);
+      } catch (err) {
+        // Only a process that died is worth a second try: yt-dlp's own answer (unavailable,
+        // sign-in, ...) would be the same from the command line, and a timeout would repeat.
+        if (err.kind !== 'exit') throw err;
+        this.log.warn(`yt-dlp worker failed (${err.message}) - running yt-dlp directly`);
+      }
+    }
+    // execFile, not exec: the video ID never touches a shell.
+    const { stdout } = await execFileP(this.cfg.ytdlpPath, ['--dump-json', ...args, '--', url], {
+      timeout: this.cfg.ytdlpTimeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return stdout;
+  }
 }
 
 /** Periodically self-update yt-dlp. YouTube changes break old versions within weeks. */
-export function scheduleYtdlpUpdates(config, logger) {
+export function scheduleYtdlpUpdates(config, logger, resolver = null) {
   if (!config.ytdlpUpdateHours) return null;
   const run = async () => {
     const [cmd, ...args] = config.ytdlpUpdateCmd
@@ -134,6 +182,7 @@ export function scheduleYtdlpUpdates(config, logger) {
       const { stdout } = await execFileP(cmd, args, { timeout: 5 * 60 * 1000 });
       logger.info('yt-dlp update:', stdout.trim().split('\n').pop());
       stats.info.ytdlp = await ytdlpVersion(config);
+      resolver?.restartWorkers(); // the loaded processes still run the old version
     } catch (err) {
       logger.warn('yt-dlp update failed:', (err.stderr || err.message).toString().trim().split('\n').pop());
     }
@@ -148,7 +197,7 @@ export function scheduleYtdlpUpdates(config, logger) {
  * gets 403s for some clients/formats (chunking rules, IP-bound URLs); yt-dlp knows how
  * to download YouTube, so let it, and only remux the local file with ffmpeg.
  */
-export async function downloadWithYtdlp(config, _logger, videoId, info, dest) {
+export async function downloadWithYtdlp(config, logger, videoId, info, dest, workers = null) {
   const common = [
     '--no-playlist', '--no-warnings', '--no-progress', '--fixup', 'never', '--no-part',
     '--force-overwrites', '-o', dest,
@@ -156,7 +205,18 @@ export async function downloadWithYtdlp(config, _logger, videoId, info, dest) {
     ...config.ytdlpExtraArgs,
   ];
   const fmt = info.formatId ?? config.ytdlpFormat;
-  const run = (args) => execFileP(config.ytdlpPath, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+  const timeout = 10 * 60 * 1000;
+  const run = async (args) => {
+    if (info.rawJson && await workers?.ready()) {
+      try {
+        return await workers.run({ op: 'download', args: ['-f', fmt, ...common], infoFile: jsonFile }, timeout);
+      } catch (err) {
+        if (err.kind !== 'exit') throw err; // see Resolver#lookup
+        logger?.warn(`yt-dlp worker failed (${err.message}) - running yt-dlp directly`);
+      }
+    }
+    return execFileP(config.ytdlpPath, args, { timeout, maxBuffer: 8 * 1024 * 1024 });
+  };
   const tail = (err) => (err.stderr || err.message || '').toString().trim().split('\n').slice(-2).join(' | ');
 
   // Reuse the JSON from resolve() so this is a pure download, not a second extraction.
